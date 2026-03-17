@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import ast, sys; ast.parse\\(open\\(''app.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(pkill -f 'streamlit run')",
+      "Bash(pip3 show:*)"
+    ]
+  }
+}
