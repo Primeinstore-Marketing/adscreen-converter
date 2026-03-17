@@ -78,6 +78,17 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Debug: catch and display any startup exception ─────────────────────────────
+import traceback as _tb
+import sys as _dbgsys
+
+def _show_startup_error():
+    exc = _dbgsys.exc_info()
+    if exc[0]:
+        st.error(f"**Startup error:** `{exc[1]}`")
+        st.code(_tb.format_exc())
+        st.stop()
+
 # ── Global colour theme ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
