@@ -65,12 +65,7 @@ log = logging.getLogger(__name__)
 
 BASE_DIR     = Path(_sys._MEIPASS) if _frozen else Path(__file__).parent
 TEMPLATE_DIR = BASE_DIR / "templates"
-INPUT_DIR    = _user_dir / "input"
-OUTPUT_DIR   = _user_dir / "output"
-PREVIEW_DIR  = _user_dir / "previews"
-
-for d in (INPUT_DIR, OUTPUT_DIR, PREVIEW_DIR):
-    d.mkdir(parents=True, exist_ok=True)
+_BASE_IO_DIR = _user_dir  # per-session subdirs created after st.set_page_config
 
 st.set_page_config(
     page_title="AdScreen Converter",
@@ -78,16 +73,16 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Debug: catch and display any startup exception ─────────────────────────────
-import traceback as _tb
-import sys as _dbgsys
-
-def _show_startup_error():
-    exc = _dbgsys.exc_info()
-    if exc[0]:
-        st.error(f"**Startup error:** `{exc[1]}`")
-        st.code(_tb.format_exc())
-        st.stop()
+# ── Per-session isolated directories (prevents multi-user file conflicts) ──────
+import uuid as _uuid
+if "session_id" not in st.session_state:
+    st.session_state.session_id = _uuid.uuid4().hex[:12]
+_sess = st.session_state.session_id
+INPUT_DIR   = _BASE_IO_DIR / "sessions" / _sess / "input"
+OUTPUT_DIR  = _BASE_IO_DIR / "sessions" / _sess / "output"
+PREVIEW_DIR = _BASE_IO_DIR / "sessions" / _sess / "previews"
+for _d in (INPUT_DIR, OUTPUT_DIR, PREVIEW_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 # ── Global colour theme ────────────────────────────────────────────────────────
 st.markdown("""
@@ -514,8 +509,8 @@ def plan_exports(
 # ZIP HELPER
 # ──────────────────────────────────────────────
 
-def zip_outputs(files: list[Path]) -> Path:
-    zip_path = OUTPUT_DIR / f"export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+def zip_outputs(files: list[Path], output_dir: Path) -> Path:
+    zip_path = output_dir / f"export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in files:
             zf.write(f, f.name)
@@ -810,7 +805,7 @@ with tab_compress:
 
                 # ZIP all if more than one
                 if len(comp_outputs) > 1:
-                    zip_path = zip_outputs([o for o, _, _ in comp_outputs])
+                    zip_path = zip_outputs([o for o, _, _ in comp_outputs], OUTPUT_DIR)
                     st.download_button(
                         label="📦 Download All as ZIP",
                         data=zip_path.read_bytes(),
@@ -1317,7 +1312,7 @@ with tab_convert:
                 )
 
         if len(output_files) > 1:
-            zip_path = zip_outputs(output_files)
+            zip_path = zip_outputs(output_files, OUTPUT_DIR)
             st.download_button(
                 label="📦 Download All as ZIP",
                 data=zip_path.read_bytes(),
