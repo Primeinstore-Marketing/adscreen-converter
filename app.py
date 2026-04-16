@@ -1,6 +1,5 @@
 
 import streamlit as st
-import streamlit.components.v1 as stc
 import json
 import subprocess
 import datetime
@@ -361,6 +360,7 @@ class Template:
 # FFMPEG UTILITIES
 # ──────────────────────────────────────────────
 
+@st.cache_data(ttl=300)
 def ffmpeg_available() -> bool:
     try:
         r = subprocess.run([_FFMPEG_BIN, "-version"], capture_output=True, timeout=10)
@@ -423,12 +423,21 @@ def export_format(
     crop_y: int,
     crf: int = 18,
     preset: str = "slow",
+    resize_mode: str = "crop",
 ) -> subprocess.CompletedProcess:
-    """Crop-scale a video to the target resolution using a pre-validated crop origin."""
-    vf = (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height}:{crop_x}:{crop_y}"
-    )
+    """Export a video to the target resolution.
+
+    resize_mode:
+      "crop"    — scale up then centre-crop (no distortion, may cut edges)
+      "stretch" — scale directly to exact dimensions (may squash/stretch)
+    """
+    if resize_mode == "stretch":
+        vf = f"scale={width}:{height}"
+    else:
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}:{crop_x}:{crop_y}"
+        )
     cmd = [
         _FFMPEG_BIN, "-y",
         "-i", str(src),
@@ -660,6 +669,19 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎛️ Export Settings")
+
+    resize_mode = st.radio(
+        "Resize mode",
+        options=["Crop to Fit", "Stretch to Fit"],
+        index=0,
+        help=(
+            "**Crop to Fit** — scales up then crops the edges. No distortion, but some content may be cut.\n\n"
+            "**Stretch to Fit** — scales directly to the exact target size. Nothing is cut, "
+            "but the video may appear squashed or stretched if the aspect ratio differs."
+        ),
+    )
+    resize_mode_key = "crop" if resize_mode == "Crop to Fit" else "stretch"
+
     use_smart_crop = st.toggle(
         "🧠 Smart Crop (AI)",
         value=True,
@@ -690,14 +712,82 @@ with st.sidebar:
 st.title("🎬 AdScreen Converter")
 st.caption("Automated multi-format video export for digital-out-of-home advertising")
 
-tab_convert, tab_compress = st.tabs(["🖥️ Convert to Templates", "📦 Compress File"])
+# ── Page navigation buttons ────────────────────────────────────────────────────
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "convert"
 
+st.markdown("""
+<style>
+.nav-bar [data-testid="stButton"] > button {
+    height: 48px !important;
+    min-height: 48px !important;
+    border-radius: 10px !important;
+    font-size: 0.95rem !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+    padding: 0 28px !important;
+    width: 100% !important;
+    transition: all 0.15s ease !important;
+}
+.nav-bar [data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
+    border: none !important;
+    color: #ffffff !important;
+    box-shadow: 0 4px 14px rgba(59,130,246,0.4) !important;
+    text-align: center !important;
+}
+.nav-bar [data-testid="stButton"] > button[kind="secondary"] {
+    background: #1a3350 !important;
+    border: 1px solid #2d5f9e !important;
+    color: #93c5fd !important;
+    text-align: center !important;
+}
+.nav-bar [data-testid="stButton"] > button[kind="secondary"]:hover {
+    background: #1e3a5f !important;
+    border-color: #3b82f6 !important;
+    color: #f1f5f9 !important;
+    min-height: 48px !important;
+    max-height: 48px !important;
+}
+.nav-bar [data-testid="stButton"] > button p,
+.nav-bar [data-testid="stButton"] > button span {
+    text-align: center !important;
+    color: inherit !important;
+    white-space: nowrap !important;
+    font-size: 0.95rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="nav-bar">', unsafe_allow_html=True)
+nav_col1, nav_col2, nav_spacer = st.columns([2, 2, 5])
+with nav_col1:
+    if st.button(
+        "🖥️  Convert to Templates",
+        type="primary" if st.session_state.active_tab == "convert" else "secondary",
+        use_container_width=True,
+        key="nav_convert",
+    ):
+        st.session_state.active_tab = "convert"
+        st.rerun()
+with nav_col2:
+    if st.button(
+        "📦  Compress File",
+        type="primary" if st.session_state.active_tab == "compress" else "secondary",
+        use_container_width=True,
+        key="nav_compress",
+    ):
+        st.session_state.active_tab = "compress"
+        st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown("---")
 
 # ══════════════════════════════════════════════
-# TAB 2 — COMPRESS
+# PAGE 2 — COMPRESS
 # ══════════════════════════════════════════════
 
-with tab_compress:
+if st.session_state.active_tab == "compress":
     st.subheader("Reduce File Size")
     st.caption("Re-encodes your video at a lower bitrate without changing the resolution or cropping.")
 
@@ -838,7 +928,7 @@ def _step_header(num: int, label: str, done: bool = False):
         unsafe_allow_html=True,
     )
 
-with tab_convert:
+if st.session_state.active_tab == "convert":
     templates = load_templates()
 
     if not templates:
@@ -864,8 +954,6 @@ with tab_convert:
     # ── Init session state ─────────────────────────
     if "selected_keys" not in st.session_state:
         st.session_state.selected_keys = []
-    if "tmpl_expander_open" not in st.session_state:
-        st.session_state.tmpl_expander_open = False
     if "custom_formats" not in st.session_state:
         st.session_state.custom_formats = []
 
@@ -877,80 +965,118 @@ with tab_convert:
     # ════════════════════════════════════
     _step_header(1, "Select Screen Template(s)", done=step1_done)
 
-    # Close any open expander when clicking outside it
-    stc.html("""
-<script>
-(function() {
-    var doc = window.parent.document;
-    doc.addEventListener('click', function(e) {
-        doc.querySelectorAll('details[open]').forEach(function(d) {
-            if (!d.contains(e.target)) {
-                d.removeAttribute('open');
-            }
-        });
-    }, true);
-})();
-</script>
-""", height=0)
+    # CSS — card-style template buttons
+    st.markdown("""
+<style>
+/* Equal-height template card buttons — targets all secondary buttons in the convert area */
+[data-testid="stButton"] > button[kind="secondary"].tmpl-btn,
+[data-testid="stButton"] > button[kind="secondary"] {
+    height: 80px !important;
+    min-height: 80px !important;
+    max-height: 80px !important;
+    text-align: left !important;
+    padding: 10px 14px !important;
+    white-space: pre-line !important;
+    line-height: 1.45 !important;
+    font-size: 0.86rem !important;
+    overflow: hidden !important;
+    border-radius: 10px !important;
+    background: #0f1f35 !important;
+    border: 2px solid #2d3748 !important;
+    color: #cbd5e1 !important;
+}
+[data-testid="stButton"] > button[kind="secondary"]:hover {
+    border-color: #3b82f6 !important;
+    background: #1a2f50 !important;
+    color: #f1f5f9 !important;
+}
+[data-testid="stButton"] > button[kind="secondary"] p,
+[data-testid="stButton"] > button[kind="secondary"] span {
+    text-align: left !important;
+    color: inherit !important;
+    white-space: pre-line !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+/* Selected template card */
+[data-testid="stButton"] > button[kind="primary"] {
+    height: 80px !important;
+    min-height: 80px !important;
+    max-height: 80px !important;
+    text-align: left !important;
+    padding: 10px 14px !important;
+    white-space: pre-line !important;
+    line-height: 1.45 !important;
+    font-size: 0.86rem !important;
+    overflow: hidden !important;
+    border-radius: 10px !important;
+    background: #1e3a5f !important;
+    border: 2px solid #60a5fa !important;
+    box-shadow: 0 0 0 3px rgba(96,165,250,0.2) !important;
+}
+[data-testid="stButton"] > button[kind="primary"] p,
+[data-testid="stButton"] > button[kind="primary"] span {
+    text-align: left !important;
+    color: #f1f5f9 !important;
+    white-space: pre-line !important;
+    font-weight: 600 !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
-    expander_label = (
-        "🔍  Choose templates…"
-        if not st.session_state.selected_keys
-        else f"🔍  {len(st.session_state.selected_keys)} template(s) selected — click to change"
+    # Search bar — reruns on every keystroke (no Enter required)
+    if "tmpl_search" not in st.session_state:
+        st.session_state.tmpl_search = ""
+    st.text_input(
+        "Search templates",
+        placeholder="🔍  Type to search templates…",
+        label_visibility="collapsed",
+        key="tmpl_search",
+        on_change=lambda: None,  # fires rerun on every character change
     )
-    _expander_open = st.session_state.tmpl_expander_open
-    st.session_state.tmpl_expander_open = False  # reset — only stays open for the triggered rerun
-    with st.expander(expander_label, expanded=_expander_open):
-        search_q = st.text_input(
-            "Search templates",
-            placeholder="🔍  Type to filter…",
-            label_visibility="collapsed",
-            key="tmpl_search",
-        )
-        filtered_keys = [k for k in all_keys if search_q.lower() in k.lower()] if search_q else all_keys
+    search_q = st.session_state.tmpl_search
 
-        COLS = 4
-        rows = [filtered_keys[i:i+COLS] for i in range(0, len(filtered_keys), COLS)]
-        for row in rows:
-            cols = st.columns(COLS)
-            for col, key in zip(cols, row):
-                t = templates[key]
-                selected = key in st.session_state.selected_keys
-                bg     = "#1e3a5f" if selected else "#1a1a2e"
-                border = "#60a5fa" if selected else "#2d3748"
-                check  = "✓ " if selected else ""
-                with col:
-                    st.markdown(
-                        f"<div style='background:{bg};border:2px solid {border};"
-                        f"border-radius:8px;padding:10px 12px;margin-bottom:4px;'>"
-                        f"<b style='color:#f1f5f9;font-size:0.85rem;'>{check}{t.name}</b><br>"
-                        f"<span style='color:#aac4e8;font-size:0.75rem;'>{t.primary_resolution} · {len(t.formats)} format(s)</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-                    if st.button(
-                        "Deselect" if selected else "Select",
-                        key=f"tmpl_btn_{key}",
-                        use_container_width=True,
-                        type="primary" if selected else "secondary",
-                    ):
-                        if selected:
-                            st.session_state.selected_keys.remove(key)
-                        else:
-                            st.session_state.selected_keys.append(key)
-                        st.session_state.tmpl_expander_open = True
-                        st.rerun()
+    if not search_q:
+        # Show selected chips even when not searching
+        if not st.session_state.selected_keys:
+            st.caption("Type above to search and select templates.")
+    else:
+        filtered_keys = [k for k in all_keys if search_q.lower() in k.lower()]
+        if not filtered_keys:
+            st.caption("No templates match your search.")
+        else:
+            st.caption(f"{len(filtered_keys)} result(s) — click a card to select / deselect")
+            COLS = 3
+            rows = [filtered_keys[i:i+COLS] for i in range(0, len(filtered_keys), COLS)]
+            for row in rows:
+                cols = st.columns(COLS)
+                for col, key in zip(cols, row):
+                    t = templates[key]
+                    selected = key in st.session_state.selected_keys
+                    short_name = t.name if len(t.name) <= 26 else t.name[:24] + "…"
+                    label = f"{'✓  ' if selected else ''}{short_name}\n{t.primary_resolution}  ·  {len(t.formats)} format(s)"
+                    css_class = "tmpl-card-btn-sel" if selected else "tmpl-card-btn"
+                    with col:
+                        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+                        if st.button(label, key=f"tmpl_btn_{key}", use_container_width=True):
+                            if selected:
+                                st.session_state.selected_keys.remove(key)
+                            else:
+                                st.session_state.selected_keys.append(key)
+                            st.rerun()
+                        st.markdown('</div>', unsafe_allow_html=True)
 
-        if st.session_state.selected_keys:
-            st.markdown("---")
-            c1, c2 = st.columns([6, 1])
-            with c1:
-                st.caption("**Selected:** " + ", ".join(st.session_state.selected_keys))
-            with c2:
-                if st.button("✕ Clear all", type="secondary", key="clear_all_tmpl"):
-                    st.session_state.selected_keys = []
-                    st.session_state.tmpl_expander_open = True
-                    st.rerun()
+    if st.session_state.selected_keys:
+        st.markdown("---")
+        c1, c2 = st.columns([6, 1])
+        with c1:
+            st.caption("**Selected:** " + "  ·  ".join(
+                templates[k].name for k in st.session_state.selected_keys
+            ))
+        with c2:
+            if st.button("✕ Clear all", type="secondary", key="clear_all_tmpl"):
+                st.session_state.selected_keys = []
+                st.rerun()
 
     # ── Optional: Custom screen size ───────────────
     _RATIOS = {
@@ -1265,6 +1391,7 @@ with tab_convert:
                 crop_y=plan.crop_y,
                 crf=crf,
                 preset=preset,
+                resize_mode=resize_mode_key,
             )
             output_files.append(out)
             log.info("Exported %s", out.name)
