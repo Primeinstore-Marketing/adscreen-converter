@@ -76,6 +76,10 @@ st.set_page_config(
 import uuid as _uuid
 if "session_id" not in st.session_state:
     st.session_state.session_id = _uuid.uuid4().hex[:12]
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
+if "compress_key" not in st.session_state:
+    st.session_state.compress_key = 0
 _sess = st.session_state.session_id
 INPUT_DIR   = _BASE_IO_DIR / "sessions" / _sess / "input"
 OUTPUT_DIR  = _BASE_IO_DIR / "sessions" / _sess / "output"
@@ -157,7 +161,7 @@ h1, h2, h3, h4, h5, h6 { color: #f1f5f9 !important; }
     border: none !important;
     color: #ffffff !important;
     font-weight: 700 !important;
-    border-radius: 8px !important;
+    border-radius: 10px !important;
     box-shadow: 0 4px 16px rgba(59,130,246,0.35) !important;
 }
 [data-testid="stButton"] > button[kind="primary"] p,
@@ -174,11 +178,31 @@ h1, h2, h3, h4, h5, h6 { color: #f1f5f9 !important; }
     border: 1px solid #3b82f6 !important;
     color: #93c5fd !important;
     font-weight: 600 !important;
-    border-radius: 8px !important;
+    border-radius: 10px !important;
 }
 [data-testid="stButton"] > button[kind="secondary"] p,
 [data-testid="stButton"] > button[kind="secondary"] span {
     color: #93c5fd !important;
+}
+
+/* ── Nav buttons — fixed height so they never resize on tab switch ────────── */
+[data-testid="stButton"][data-key="nav_convert"] > button,
+[data-testid="stButton"][data-key="nav_compress"] > button {
+    height: 48px !important;
+    min-height: 48px !important;
+    max-height: 48px !important;
+    white-space: nowrap !important;
+    text-align: center !important;
+    font-size: 0.95rem !important;
+    padding: 0 28px !important;
+}
+[data-testid="stButton"][data-key="nav_convert"] > button p,
+[data-testid="stButton"][data-key="nav_convert"] > button span,
+[data-testid="stButton"][data-key="nav_compress"] > button p,
+[data-testid="stButton"][data-key="nav_compress"] > button span {
+    text-align: center !important;
+    white-space: nowrap !important;
+    color: inherit !important;
 }
 [data-testid="stButton"] > button[kind="secondary"]:hover {
     background: #1e3a5f !important;
@@ -791,14 +815,24 @@ if st.session_state.active_tab == "compress":
     st.subheader("Reduce File Size")
     st.caption("Re-encodes your video at a lower bitrate without changing the resolution or cropping.")
 
+    # Check if output files were passed over from the convert tab
+    _queued = st.session_state.get("compress_queued_files", [])
+    _queued = [p for p in _queued if Path(p).exists()]  # drop any stale paths
+
+    if _queued:
+        st.info(f"📂 {len(_queued)} converted file(s) ready to compress — or upload different files below.")
+        if st.button("✕ Clear queued files", type="secondary", key="clear_queued"):
+            st.session_state.compress_queued_files = []
+            st.rerun()
+
     comp_uploaded = st.file_uploader(
-        "📤 Upload files to compress (MP4, MOV, GIF)",
-        type=["mp4", "mov", "gif"],
-        key="compress_upload",
+        "📤 Upload files to compress (MP4, MOV, GIF, JPG, PNG)",
+        type=["mp4", "mov", "gif", "jpg", "jpeg", "png"],
+        key=f"compress_upload_{st.session_state.compress_key}",
         accept_multiple_files=True,
     )
 
-    if comp_uploaded:
+    if comp_uploaded or _queued:
         comp_level = st.select_slider(
             "Compression level",
             options=["Light", "Medium", "High", "Maximum"],
@@ -808,7 +842,7 @@ if st.session_state.active_tab == "compress":
         crf_map = {"Light": 22, "Medium": 28, "High": 34, "Maximum": 40}
         comp_crf = crf_map[comp_level]
 
-        # Show file list with sizes
+        # Build input list: uploaded files + queued files from convert tab
         total_orig_mb = 0.0
         comp_inputs = []
         for f in comp_uploaded:
@@ -817,6 +851,11 @@ if st.session_state.active_tab == "compress":
             mb = comp_input.stat().st_size / 1_000_000
             total_orig_mb += mb
             comp_inputs.append((comp_input, mb))
+        for p in _queued:
+            p = Path(p)
+            mb = p.stat().st_size / 1_000_000
+            total_orig_mb += mb
+            comp_inputs.append((p, mb))
 
         st.markdown(f"**{len(comp_inputs)} file(s) queued — total {total_orig_mb:.1f} MB**")
         for comp_input, mb in comp_inputs:
@@ -832,8 +871,12 @@ if st.session_state.active_tab == "compress":
                 status.markdown(f"Compressing **{comp_input.name.replace('compress_', '')}** ({idx+1}/{len(comp_inputs)})…")
                 comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.mp4"
                 try:
+                    is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
                     is_gif = comp_input.suffix.lower() == ".gif"
-                    if is_gif:
+                    if is_image:
+                        # Convert still image → 10-second compressed MP4
+                        image_to_video(comp_input, comp_out, duration=10)
+                    elif is_gif:
                         # GIF optimisation: reduce palette colours based on compression level
                         colours_map = {"Light": 256, "Medium": 128, "High": 64, "Maximum": 32}
                         colours = colours_map[comp_level]
@@ -903,7 +946,33 @@ if st.session_state.active_tab == "compress":
                         mime="application/zip",
                         key="comp_zip",
                     )
-    else:
+
+                # ── Post-download actions ──────────────────────────────────
+                st.markdown("---")
+                st.markdown("#### What would you like to do next?")
+                _ca, _cb, _cc = st.columns(3)
+                with _ca:
+                    if st.button("🗜️ Compress More Files", type="secondary",
+                                 use_container_width=True, key="comp_next_more"):
+                        st.session_state.compress_key += 1
+                        st.session_state.compress_queued_files = []
+                        st.rerun()
+                with _cb:
+                    if st.button("🖥️ Convert Files", type="secondary",
+                                 use_container_width=True, key="comp_next_convert"):
+                        st.session_state.active_tab = "convert"
+                        st.rerun()
+                with _cc:
+                    if st.button("🗑️ Start Fresh", type="secondary",
+                                 use_container_width=True, key="comp_next_fresh"):
+                        for _k in ["selected_keys", "custom_formats", "ae_template",
+                                   "compress_queued_files"]:
+                            st.session_state.pop(_k, None)
+                        st.session_state.upload_key = st.session_state.get("upload_key", 0) + 1
+                        st.session_state.compress_key = st.session_state.get("compress_key", 0) + 1
+                        st.session_state.active_tab = "convert"
+                        st.rerun()
+    elif not _queued:
         st.info("Upload one or more video files to get started.")
 
 
@@ -965,21 +1034,17 @@ if st.session_state.active_tab == "convert":
     # ════════════════════════════════════
     _step_header(1, "Select Screen Template(s)", done=step1_done)
 
-    # CSS — card-style template buttons
+    # CSS — card-style template buttons (height scoped to pre-line cards only, not nav)
     st.markdown("""
 <style>
-/* Equal-height template card buttons — targets all secondary buttons in the convert area */
-[data-testid="stButton"] > button[kind="secondary"].tmpl-btn,
+/* Unselected template card */
 [data-testid="stButton"] > button[kind="secondary"] {
-    height: 80px !important;
-    min-height: 80px !important;
-    max-height: 80px !important;
+    min-height: 72px !important;
     text-align: left !important;
     padding: 10px 14px !important;
     white-space: pre-line !important;
     line-height: 1.45 !important;
     font-size: 0.86rem !important;
-    overflow: hidden !important;
     border-radius: 10px !important;
     background: #0f1f35 !important;
     border: 2px solid #2d3748 !important;
@@ -995,20 +1060,15 @@ if st.session_state.active_tab == "convert":
     text-align: left !important;
     color: inherit !important;
     white-space: pre-line !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
 }
 /* Selected template card */
 [data-testid="stButton"] > button[kind="primary"] {
-    height: 80px !important;
-    min-height: 80px !important;
-    max-height: 80px !important;
+    min-height: 72px !important;
     text-align: left !important;
     padding: 10px 14px !important;
     white-space: pre-line !important;
     line-height: 1.45 !important;
     font-size: 0.86rem !important;
-    overflow: hidden !important;
     border-radius: 10px !important;
     background: #1e3a5f !important;
     border: 2px solid #60a5fa !important;
@@ -1253,6 +1313,7 @@ if st.session_state.active_tab == "convert":
         "Upload master file",
         type=["mp4", "mov", "jpg", "jpeg", "png"],
         label_visibility="collapsed",
+        key=f"master_upload_{st.session_state.upload_key}",
     )
 
     if not uploaded:
@@ -1448,11 +1509,30 @@ if st.session_state.active_tab == "convert":
                 use_container_width=True,
             )
 
+        # ── Post-download actions ──────────────────────────────────────────
         st.markdown("---")
-        if st.button("🔄 Start Over", type="secondary"):
-            for key in ["selected_keys", "custom_formats", "ae_template", "tmpl_expander_open"]:
-                st.session_state.pop(key, None)
-            st.rerun()
+        st.markdown("#### What would you like to do next?")
+        _na, _nb, _nc = st.columns(3)
+        with _na:
+            if st.button("🔄 Convert Another File", type="secondary",
+                         use_container_width=True, key="next_convert_another"):
+                st.session_state.upload_key += 1
+                st.rerun()
+        with _nb:
+            if st.button("🗜️ Compress These Files", type="secondary",
+                         use_container_width=True, key="next_compress_these"):
+                st.session_state.compress_queued_files = [str(p) for p in output_files]
+                st.session_state.active_tab = "compress"
+                st.rerun()
+        with _nc:
+            if st.button("🗑️ Start Fresh", type="secondary",
+                         use_container_width=True, key="next_start_fresh"):
+                for _k in ["selected_keys", "custom_formats", "ae_template",
+                            "compress_queued_files"]:
+                    st.session_state.pop(_k, None)
+                st.session_state.upload_key += 1
+                st.session_state.compress_key += 1
+                st.rerun()
 
     if errors:
         with st.expander(f"⚠️ {len(errors)} format(s) failed — click to see details"):
