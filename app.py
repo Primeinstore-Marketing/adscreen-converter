@@ -469,6 +469,7 @@ def export_format(
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", preset,
+        "-an",
         "-movflags", "+faststart",
         str(dst),
     ]
@@ -904,7 +905,7 @@ if st.session_state.active_tab == "compress":
                             "-c:v", "libx264",
                             "-crf", str(comp_crf),
                             "-preset", "medium",
-                            "-c:a", "aac", "-b:a", "128k",
+                            "-an",
                             "-movflags", "+faststart",
                             str(comp_out),
                         ])
