@@ -863,8 +863,11 @@ if st.session_state.active_tab == "compress":
             st.caption(f"• {comp_input.name.replace('compress_', '')}  —  {mb:.1f} MB")
 
         if st.button("🗜️ Compress All", type="primary", key="compress_btn"):
-            comp_outputs = []
-            total_new_mb = 0.0
+            # Clear any previous results before starting new compression
+            st.session_state.pop("comp_results", None)
+
+            _comp_outputs = []
+            _total_new_mb = 0.0
             progress = st.progress(0)
             status   = st.empty()
 
@@ -873,16 +876,14 @@ if st.session_state.active_tab == "compress":
                 comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.mp4"
                 try:
                     is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
-                    is_gif = comp_input.suffix.lower() == ".gif"
+                    is_gif   = comp_input.suffix.lower() == ".gif"
                     if is_image:
-                        # Convert still image → 10-second compressed MP4
                         image_to_video(comp_input, comp_out, duration=10)
                     elif is_gif:
-                        # GIF optimisation: reduce palette colours based on compression level
                         colours_map = {"Light": 256, "Medium": 128, "High": 64, "Maximum": 32}
+                        fps_map     = {"Light": 25,  "Medium": 15,  "High": 10, "Maximum": 8}
                         colours = colours_map[comp_level]
-                        fps_map = {"Light": 25, "Medium": 15, "High": 10, "Maximum": 8}
-                        fps = fps_map[comp_level]
+                        fps     = fps_map[comp_level]
                         palette = OUTPUT_DIR / f"_palette_{comp_input.stem}.png"
                         _run([
                             _FFMPEG_BIN, "-y", "-i", str(comp_input),
@@ -892,8 +893,7 @@ if st.session_state.active_tab == "compress":
                         comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.gif"
                         _run([
                             _FFMPEG_BIN, "-y",
-                            "-i", str(comp_input),
-                            "-i", str(palette),
+                            "-i", str(comp_input), "-i", str(palette),
                             "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
                             str(comp_out),
                         ])
@@ -910,70 +910,90 @@ if st.session_state.active_tab == "compress":
                             str(comp_out),
                         ])
                     new_mb = comp_out.stat().st_size / 1_000_000
-                    total_new_mb += new_mb
-                    comp_outputs.append((comp_out, orig_mb, new_mb))
-                except RuntimeError as exc:
+                    _total_new_mb += new_mb
+                    _comp_outputs.append((str(comp_out), orig_mb, new_mb))
+                except Exception as exc:
                     st.error(f"Failed: {comp_input.name} — {exc}")
                 progress.progress((idx + 1) / len(comp_inputs))
 
             status.empty()
 
-            if comp_outputs:
-                saved = total_orig_mb - total_new_mb
-                pct   = (saved / total_orig_mb * 100) if total_orig_mb else 0
-                st.success(f"✅ {len(comp_outputs)} file(s) compressed — {total_orig_mb:.1f} MB → {total_new_mb:.1f} MB ({pct:.0f}% smaller)")
+            # Persist results so download buttons survive page reruns
+            if _comp_outputs:
+                st.session_state.comp_results = {
+                    "outputs": _comp_outputs,
+                    "total_orig_mb": total_orig_mb,
+                    "total_new_mb": _total_new_mb,
+                }
+            st.rerun()
 
-                # Per-file download buttons
-                st.markdown("#### 📥 Download")
-                for comp_out, orig_mb, new_mb in comp_outputs:
-                    saved_mb = orig_mb - new_mb
-                    pct_f    = (saved_mb / orig_mb * 100) if orig_mb else 0
-                    _mime = "image/gif" if comp_out.suffix.lower() == ".gif" else "video/mp4"
-                    st.download_button(
-                        label=f"⬇ {comp_out.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
-                        data=comp_out.read_bytes(),
-                        file_name=comp_out.name,
-                        mime=_mime,
-                        key=f"comp_dl_{comp_out.name}",
-                    )
+    # ── Results — shown from session state so they survive reruns ────────────
+    _res = st.session_state.get("comp_results")
+    if _res:
+        _outputs      = _res["outputs"]          # list of (path_str, orig_mb, new_mb)
+        _t_orig       = _res["total_orig_mb"]
+        _t_new        = _res["total_new_mb"]
+        _saved        = _t_orig - _t_new
+        _pct          = (_saved / _t_orig * 100) if _t_orig else 0
 
-                # ZIP all if more than one
-                if len(comp_outputs) > 1:
-                    zip_path = zip_outputs([o for o, _, _ in comp_outputs], OUTPUT_DIR)
-                    st.download_button(
-                        label="📦 Download All as ZIP",
-                        data=zip_path.read_bytes(),
-                        file_name=zip_path.name,
-                        mime="application/zip",
-                        key="comp_zip",
-                    )
+        st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
 
-                # ── Post-download actions ──────────────────────────────────
-                st.markdown("---")
-                st.markdown("#### What would you like to do next?")
-                _ca, _cb, _cc = st.columns(3)
-                with _ca:
-                    if st.button("🗜️ Compress More Files", type="secondary",
-                                 use_container_width=True, key="comp_next_more"):
-                        st.session_state.compress_key += 1
-                        st.session_state.compress_queued_files = []
-                        st.rerun()
-                with _cb:
-                    if st.button("🖥️ Convert Files", type="secondary",
-                                 use_container_width=True, key="comp_next_convert"):
-                        st.session_state.active_tab = "convert"
-                        st.rerun()
-                with _cc:
-                    if st.button("🗑️ Start Fresh", type="secondary",
-                                 use_container_width=True, key="comp_next_fresh"):
-                        for _k in ["selected_keys", "custom_formats", "ae_template",
-                                   "compress_queued_files"]:
-                            st.session_state.pop(_k, None)
-                        st.session_state.upload_key = st.session_state.get("upload_key", 0) + 1
-                        st.session_state.compress_key = st.session_state.get("compress_key", 0) + 1
-                        st.session_state.active_tab = "convert"
-                        st.rerun()
-    elif not _queued:
+        st.markdown("#### 📥 Download")
+        for i, (path_str, orig_mb, new_mb) in enumerate(_outputs):
+            _p = Path(path_str)
+            if not _p.exists():
+                st.warning(f"File no longer available: {_p.name}")
+                continue
+            saved_mb = orig_mb - new_mb
+            pct_f    = (saved_mb / orig_mb * 100) if orig_mb else 0
+            _mime    = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
+            st.download_button(
+                label=f"⬇ {_p.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
+                data=_p.read_bytes(),
+                file_name=_p.name,
+                mime=_mime,
+                key=f"comp_dl_{i}",
+            )
+
+        if len(_outputs) > 1:
+            _valid_paths = [Path(p) for p, _, _ in _outputs if Path(p).exists()]
+            if _valid_paths:
+                zip_path = zip_outputs(_valid_paths, OUTPUT_DIR)
+                st.download_button(
+                    label="📦 Download All as ZIP",
+                    data=zip_path.read_bytes(),
+                    file_name=zip_path.name,
+                    mime="application/zip",
+                    key="comp_zip",
+                )
+
+        st.markdown("---")
+        st.markdown("#### What would you like to do next?")
+        _ca, _cb, _cc = st.columns(3)
+        with _ca:
+            if st.button("🗜️ Compress More Files", type="secondary",
+                         use_container_width=True, key="comp_next_more"):
+                st.session_state.compress_key += 1
+                st.session_state.pop("comp_results", None)
+                st.session_state.compress_queued_files = []
+                st.rerun()
+        with _cb:
+            if st.button("🖥️ Convert Files", type="secondary",
+                         use_container_width=True, key="comp_next_convert"):
+                st.session_state.active_tab = "convert"
+                st.rerun()
+        with _cc:
+            if st.button("🗑️ Start Fresh", type="secondary",
+                         use_container_width=True, key="comp_next_fresh"):
+                for _k in ["selected_keys", "custom_formats", "ae_template",
+                            "compress_queued_files", "comp_results"]:
+                    st.session_state.pop(_k, None)
+                st.session_state.upload_key += 1
+                st.session_state.compress_key += 1
+                st.session_state.active_tab = "convert"
+                st.rerun()
+
+    elif not (comp_uploaded or _queued):
         st.info("Upload one or more video files to get started.")
 
 
