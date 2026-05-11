@@ -838,16 +838,20 @@ if st.session_state.active_tab == "compress":
             "Compression level",
             options=["Light", "Medium", "High", "Maximum"],
             value="Medium",
+            key="comp_level_slider",
             help="Light = best quality / larger file.  Maximum = smallest file / lower quality.",
         )
         crf_map = {"Light": 22, "Medium": 28, "High": 34, "Maximum": 40}
         comp_crf = crf_map[comp_level]
 
-        # Show file list using metadata only — no f.read() here, that runs on every render
+        # Show file list using metadata only — no f.read() here, runs on every render
         total_orig_mb = 0.0
         file_meta = []   # (display_name, size_mb, is_queued, source)
         for f in comp_uploaded:
-            mb = (f.size or 0) / 1_000_000
+            try:
+                mb = (getattr(f, "size", None) or len(f.getvalue())) / 1_000_000
+            except Exception:
+                mb = 0.0
             total_orig_mb += mb
             file_meta.append((f.name, mb, False, f))
         for p in _queued:
@@ -861,18 +865,27 @@ if st.session_state.active_tab == "compress":
             st.caption(f"• {name}  —  {mb:.1f} MB")
 
         if st.button("🗜️ Compress All", type="primary", key="compress_btn"):
-            # Clear any previous results before starting new compression
             st.session_state.pop("comp_results", None)
 
-            # Write uploaded files to disk NOW (only once, inside the button handler)
+            # Save uploaded files to disk one at a time (inside handler — runs once)
             comp_inputs = []
+            save_err = False
             for name, mb, is_queued, src in file_meta:
                 if is_queued:
                     comp_inputs.append((Path(src), mb))
                 else:
-                    comp_input = INPUT_DIR / f"compress_{src.name}"
-                    comp_input.write_bytes(src.read())
-                    comp_inputs.append((comp_input, mb))
+                    try:
+                        comp_input = INPUT_DIR / f"compress_{src.name}"
+                        data = src.getvalue() if hasattr(src, "getvalue") else src.read()
+                        comp_input.write_bytes(data)
+                        actual_mb = comp_input.stat().st_size / 1_000_000
+                        comp_inputs.append((comp_input, actual_mb))
+                    except Exception as exc:
+                        st.error(f"Could not save {name}: {exc}")
+                        save_err = True
+
+            if save_err:
+                st.stop()
 
             _comp_outputs = []
             _total_new_mb = 0.0
@@ -880,8 +893,10 @@ if st.session_state.active_tab == "compress":
             status   = st.empty()
 
             for idx, (comp_input, orig_mb) in enumerate(comp_inputs):
-                status.markdown(f"Compressing **{comp_input.name.replace('compress_', '')}** ({idx+1}/{len(comp_inputs)})…")
-                comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.mp4"
+                display_name = comp_input.name.replace("compress_", "")
+                status.markdown(f"Compressing **{display_name}** ({idx+1}/{len(comp_inputs)})…")
+                safe_stem = comp_input.stem.replace("compress_", "")
+                comp_out  = OUTPUT_DIR / f"compressed_{safe_stem}.mp4"
                 try:
                     is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
                     is_gif   = comp_input.suffix.lower() == ".gif"
@@ -892,88 +907,88 @@ if st.session_state.active_tab == "compress":
                         fps_map     = {"Light": 25,  "Medium": 15,  "High": 10, "Maximum": 8}
                         colours = colours_map[comp_level]
                         fps     = fps_map[comp_level]
-                        palette = OUTPUT_DIR / f"_palette_{comp_input.stem}.png"
-                        _run([
-                            _FFMPEG_BIN, "-y", "-i", str(comp_input),
-                            "-vf", f"fps={fps},palettegen=max_colors={colours}:stats_mode=diff",
-                            str(palette),
-                        ])
-                        comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.gif"
-                        _run([
-                            _FFMPEG_BIN, "-y",
-                            "-i", str(comp_input), "-i", str(palette),
-                            "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
-                            str(comp_out),
-                        ])
+                        palette = OUTPUT_DIR / f"_palette_{safe_stem}.png"
+                        _run([_FFMPEG_BIN, "-y", "-i", str(comp_input),
+                              "-vf", f"fps={fps},palettegen=max_colors={colours}:stats_mode=diff",
+                              str(palette)])
+                        comp_out = OUTPUT_DIR / f"compressed_{safe_stem}.gif"
+                        _run([_FFMPEG_BIN, "-y",
+                              "-i", str(comp_input), "-i", str(palette),
+                              "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
+                              str(comp_out)])
                         palette.unlink(missing_ok=True)
                     else:
-                        _run([
-                            _FFMPEG_BIN, "-y",
-                            "-i", str(comp_input),
-                            "-c:v", "libx264",
-                            "-crf", str(comp_crf),
-                            "-preset", "medium",
-                            "-an",
-                            "-movflags", "+faststart",
-                            str(comp_out),
-                        ])
+                        _run([_FFMPEG_BIN, "-y",
+                              "-i", str(comp_input),
+                              "-c:v", "libx264", "-crf", str(comp_crf),
+                              "-preset", "medium", "-an",
+                              "-movflags", "+faststart",
+                              str(comp_out)])
                     new_mb = comp_out.stat().st_size / 1_000_000
                     _total_new_mb += new_mb
                     _comp_outputs.append((str(comp_out), orig_mb, new_mb))
                 except Exception as exc:
-                    st.error(f"Failed: {comp_input.name} — {exc}")
+                    st.error(f"Failed: {display_name} — {exc}")
+                    log.error("Compress failed for %s: %s", display_name, exc)
                 progress.progress((idx + 1) / len(comp_inputs))
 
             status.empty()
 
-            # Persist results so download buttons survive page reruns
             if _comp_outputs:
+                # Build ZIP once now — store path so results section never recreates it
+                _zip_path_str = None
+                if len(_comp_outputs) > 1:
+                    try:
+                        _zp = zip_outputs([Path(p) for p, _, _ in _comp_outputs], OUTPUT_DIR)
+                        _zip_path_str = str(_zp)
+                    except Exception as exc:
+                        log.error("ZIP creation failed: %s", exc)
+
                 st.session_state.comp_results = {
-                    "outputs": _comp_outputs,
+                    "outputs":       _comp_outputs,
                     "total_orig_mb": total_orig_mb,
-                    "total_new_mb": _total_new_mb,
+                    "total_new_mb":  _total_new_mb,
+                    "zip_path":      _zip_path_str,
                 }
             st.rerun()
 
-    # ── Results — shown from session state so they survive reruns ────────────
+    # ── Results — driven by session state, survives all reruns ───────────────
     _res = st.session_state.get("comp_results")
     if _res:
-        _outputs      = _res["outputs"]          # list of (path_str, orig_mb, new_mb)
-        _t_orig       = _res["total_orig_mb"]
-        _t_new        = _res["total_new_mb"]
-        _saved        = _t_orig - _t_new
-        _pct          = (_saved / _t_orig * 100) if _t_orig else 0
+        _outputs = _res["outputs"]
+        _t_orig  = _res["total_orig_mb"]
+        _t_new   = _res["total_new_mb"]
+        _pct     = ((_t_orig - _t_new) / _t_orig * 100) if _t_orig else 0
 
         st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
-
         st.markdown("#### 📥 Download")
+
         for i, (path_str, orig_mb, new_mb) in enumerate(_outputs):
             _p = Path(path_str)
             if not _p.exists():
                 st.warning(f"File no longer available: {_p.name}")
                 continue
-            saved_mb = orig_mb - new_mb
-            pct_f    = (saved_mb / orig_mb * 100) if orig_mb else 0
-            _mime    = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
+            pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+            _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
             st.download_button(
                 label=f"⬇ {_p.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
-                data=_p.read_bytes(),
+                data=open(_p, "rb"),
                 file_name=_p.name,
                 mime=_mime,
                 key=f"comp_dl_{i}",
             )
 
-        if len(_outputs) > 1:
-            _valid_paths = [Path(p) for p, _, _ in _outputs if Path(p).exists()]
-            if _valid_paths:
-                zip_path = zip_outputs(_valid_paths, OUTPUT_DIR)
-                st.download_button(
-                    label="📦 Download All as ZIP",
-                    data=zip_path.read_bytes(),
-                    file_name=zip_path.name,
-                    mime="application/zip",
-                    key="comp_zip",
-                )
+        # ZIP was built during compression — just serve from cached path
+        _zip_str = _res.get("zip_path")
+        if _zip_str and Path(_zip_str).exists():
+            _zp = Path(_zip_str)
+            st.download_button(
+                label="📦 Download All as ZIP",
+                data=open(_zp, "rb"),
+                file_name=_zp.name,
+                mime="application/zip",
+                key="comp_zip",
+            )
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
