@@ -843,28 +843,36 @@ if st.session_state.active_tab == "compress":
         crf_map = {"Light": 22, "Medium": 28, "High": 34, "Maximum": 40}
         comp_crf = crf_map[comp_level]
 
-        # Build input list: uploaded files + queued files from convert tab
+        # Show file list using metadata only — no f.read() here, that runs on every render
         total_orig_mb = 0.0
-        comp_inputs = []
+        file_meta = []   # (display_name, size_mb, is_queued, source)
         for f in comp_uploaded:
-            comp_input = INPUT_DIR / f"compress_{f.name}"
-            comp_input.write_bytes(f.read())
-            mb = comp_input.stat().st_size / 1_000_000
+            mb = (f.size or 0) / 1_000_000
             total_orig_mb += mb
-            comp_inputs.append((comp_input, mb))
+            file_meta.append((f.name, mb, False, f))
         for p in _queued:
             p = Path(p)
             mb = p.stat().st_size / 1_000_000
             total_orig_mb += mb
-            comp_inputs.append((p, mb))
+            file_meta.append((p.name, mb, True, p))
 
-        st.markdown(f"**{len(comp_inputs)} file(s) queued — total {total_orig_mb:.1f} MB**")
-        for comp_input, mb in comp_inputs:
-            st.caption(f"• {comp_input.name.replace('compress_', '')}  —  {mb:.1f} MB")
+        st.markdown(f"**{len(file_meta)} file(s) queued — total {total_orig_mb:.1f} MB**")
+        for name, mb, _, _ in file_meta:
+            st.caption(f"• {name}  —  {mb:.1f} MB")
 
         if st.button("🗜️ Compress All", type="primary", key="compress_btn"):
             # Clear any previous results before starting new compression
             st.session_state.pop("comp_results", None)
+
+            # Write uploaded files to disk NOW (only once, inside the button handler)
+            comp_inputs = []
+            for name, mb, is_queued, src in file_meta:
+                if is_queued:
+                    comp_inputs.append((Path(src), mb))
+                else:
+                    comp_input = INPUT_DIR / f"compress_{src.name}"
+                    comp_input.write_bytes(src.read())
+                    comp_inputs.append((comp_input, mb))
 
             _comp_outputs = []
             _total_new_mb = 0.0
