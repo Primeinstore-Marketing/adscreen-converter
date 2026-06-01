@@ -87,6 +87,20 @@ PREVIEW_DIR = _BASE_IO_DIR / "sessions" / _sess / "previews"
 for _d in (INPUT_DIR, OUTPUT_DIR, PREVIEW_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+# ── Keepalive: ping Streamlit's health endpoint every 30 s to prevent sleep ───
+import streamlit.components.v1 as _stc
+_stc.html("""
+<script>
+(function() {
+    function ping() {
+        fetch('/_stcore/health').catch(function(){});
+    }
+    ping();
+    setInterval(ping, 30000);
+})();
+</script>
+""", height=0)
+
 # ── Global colour theme ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -963,32 +977,41 @@ if st.session_state.active_tab == "compress":
         st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
         st.markdown("#### 📥 Download")
 
-        for i, (path_str, orig_mb, new_mb) in enumerate(_outputs):
-            _p = Path(path_str)
-            if not _p.exists():
-                st.warning(f"File no longer available: {_p.name}")
-                continue
-            pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
-            _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
-            st.download_button(
-                label=f"⬇ {_p.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
-                data=open(_p, "rb"),
-                file_name=_p.name,
-                mime=_mime,
-                key=f"comp_dl_{i}",
-            )
+        if len(_outputs) == 1:
+            # Single file — one download button, load only that file
+            _p = Path(_outputs[0][0])
+            if _p.exists():
+                orig_mb, new_mb = _outputs[0][1], _outputs[0][2]
+                pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+                _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
+                st.download_button(
+                    label=f"⬇ {_p.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
+                    data=open(_p, "rb"),
+                    file_name=_p.name,
+                    mime=_mime,
+                    key="comp_dl_0",
+                )
+        else:
+            # Multiple files — list what was compressed, offer only the ZIP
+            # (loading N large files into RAM simultaneously causes crashes)
+            for path_str, orig_mb, new_mb in _outputs:
+                _p = Path(path_str)
+                pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+                status_icon = "✓" if _p.exists() else "✗"
+                st.caption(f"{status_icon} {_p.name}  —  {new_mb:.1f} MB  (-{pct_f:.0f}%)")
 
-        # ZIP was built during compression — just serve from cached path
-        _zip_str = _res.get("zip_path")
-        if _zip_str and Path(_zip_str).exists():
-            _zp = Path(_zip_str)
-            st.download_button(
-                label="📦 Download All as ZIP",
-                data=open(_zp, "rb"),
-                file_name=_zp.name,
-                mime="application/zip",
-                key="comp_zip",
-            )
+            _zip_str = _res.get("zip_path")
+            if _zip_str and Path(_zip_str).exists():
+                _zp = Path(_zip_str)
+                st.download_button(
+                    label="📦 Download All as ZIP",
+                    data=open(_zp, "rb"),
+                    file_name=_zp.name,
+                    mime="application/zip",
+                    key="comp_zip",
+                )
+            else:
+                st.warning("ZIP not available — try compressing again.")
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
