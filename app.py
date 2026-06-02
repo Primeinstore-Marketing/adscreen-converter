@@ -977,41 +977,74 @@ if st.session_state.active_tab == "compress":
         st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
         st.markdown("#### 📥 Download")
 
-        if len(_outputs) == 1:
-            # Single file — one download button, load only that file
-            _p = Path(_outputs[0][0])
-            if _p.exists():
-                orig_mb, new_mb = _outputs[0][1], _outputs[0][2]
-                pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+        # File-by-file navigator — only ONE file is loaded into RAM at a time.
+        # Loading all files (or a large ZIP) simultaneously causes OOM on cloud.
+        _dl_idx = _res.get("dl_idx", 0)
+        _valid  = [(p, o, n) for p, o, n in _outputs if Path(p).exists()]
+
+        if not _valid:
+            st.warning("Output files no longer available. Please compress again.")
+        else:
+            # Clamp index
+            _dl_idx = min(_dl_idx, len(_valid) - 1)
+
+            # Summary list
+            for path_str, orig_mb, new_mb in _outputs:
+                _p   = Path(path_str)
+                _pf  = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+                _ico = "✓" if _p.exists() else "✗"
+                st.caption(f"{_ico}  {_p.name}  —  {new_mb:.1f} MB  (-{_pf:.0f}%)")
+
+            st.markdown("---")
+
+            if len(_valid) == 1:
+                # Only one file — serve it directly
+                _p, _o, _n = _valid[0]
+                _p = Path(_p)
+                _pf   = ((_o - _n) / _o * 100) if _o else 0
                 _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
                 st.download_button(
-                    label=f"⬇ {_p.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
+                    label=f"⬇ {_p.name}  ({_n:.1f} MB, -{_pf:.0f}%)",
                     data=open(_p, "rb"),
                     file_name=_p.name,
                     mime=_mime,
-                    key="comp_dl_0",
-                )
-        else:
-            # Multiple files — list what was compressed, offer only the ZIP
-            # (loading N large files into RAM simultaneously causes crashes)
-            for path_str, orig_mb, new_mb in _outputs:
-                _p = Path(path_str)
-                pct_f = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
-                status_icon = "✓" if _p.exists() else "✗"
-                st.caption(f"{status_icon} {_p.name}  —  {new_mb:.1f} MB  (-{pct_f:.0f}%)")
-
-            _zip_str = _res.get("zip_path")
-            if _zip_str and Path(_zip_str).exists():
-                _zp = Path(_zip_str)
-                st.download_button(
-                    label="📦 Download All as ZIP",
-                    data=open(_zp, "rb"),
-                    file_name=_zp.name,
-                    mime="application/zip",
-                    key="comp_zip",
+                    key="comp_dl_single",
                 )
             else:
-                st.warning("ZIP not available — try compressing again.")
+                # Multiple files — show navigator (one file in RAM at a time)
+                _cur_path, _cur_o, _cur_n = _valid[_dl_idx]
+                _cur_p  = Path(_cur_path)
+                _cur_pf = ((_cur_o - _cur_n) / _cur_o * 100) if _cur_o else 0
+                _mime   = "image/gif" if _cur_p.suffix.lower() == ".gif" else "video/mp4"
+
+                st.markdown(f"**File {_dl_idx + 1} of {len(_valid)}** — {_cur_p.name}")
+                _dc1, _dc2, _dc3 = st.columns([3, 1, 1])
+                with _dc1:
+                    st.download_button(
+                        label=f"⬇ Download  ({_cur_n:.1f} MB, -{_cur_pf:.0f}%)",
+                        data=open(_cur_p, "rb"),
+                        file_name=_cur_p.name,
+                        mime=_mime,
+                        key="comp_dl_nav",
+                        use_container_width=True,
+                        type="primary",
+                    )
+                with _dc2:
+                    _prev_off = _dl_idx == 0
+                    if st.button("◀ Prev", key="comp_dl_prev",
+                                 use_container_width=True,
+                                 disabled=_prev_off):
+                        _res["dl_idx"] = _dl_idx - 1
+                        st.session_state.comp_results = _res
+                        st.rerun()
+                with _dc3:
+                    _next_off = _dl_idx >= len(_valid) - 1
+                    if st.button("Next ▶", key="comp_dl_next",
+                                 use_container_width=True,
+                                 disabled=_next_off):
+                        _res["dl_idx"] = _dl_idx + 1
+                        st.session_state.comp_results = _res
+                        st.rerun()
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
