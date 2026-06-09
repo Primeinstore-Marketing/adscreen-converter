@@ -1028,20 +1028,31 @@ if st.session_state.active_tab == "compress":
 
         st.markdown("---")
 
-        # Static download links — files served directly by Streamlit's static
-        # file server. Zero bytes loaded into Python RAM.
+        # Static download links — rendered in a raw-HTML iframe so the
+        # `download` attribute is honoured and triggers an instant save dialog.
         _static_urls = _res.get("static_urls", [])
         if _static_urls:
-            _links_html = '<div class="dl-link-wrap">'
+            import math as _math
+            _dl_rows = _math.ceil(len(_static_urls) / 3)
+            _dl_h    = max(60, _dl_rows * 56 + 16)
+            _dl_html = """<style>
+body{margin:0;padding:0;background:transparent}
+.wrap{display:flex;flex-wrap:wrap;gap:10px;padding:4px 0}
+a.btn{display:inline-flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#2563eb,#3b82f6);color:#fff;
+  font-weight:700;font-size:14px;font-family:sans-serif;border-radius:10px;
+  padding:11px 22px;text-decoration:none;white-space:nowrap;
+  box-shadow:0 4px 16px rgba(59,130,246,.35);cursor:pointer}
+a.btn:hover{filter:brightness(1.12)}
+</style><div class="wrap">"""
             for _url, _fname, _o, _n in _static_urls:
                 _pf = ((_o - _n) / _o * 100) if _o else 0
-                _links_html += (
-                    f'<a href="{_url}" target="_blank" class="dl-link-btn">'
-                    f'⬇&nbsp;{_fname}&nbsp;({_n:.1f}&nbsp;MB,&nbsp;−{_pf:.0f}%)</a>'
+                _dl_html += (
+                    f'<a href="{_url}" download="{_fname}" class="btn">'
+                    f'⬇ {_fname} ({_n:.1f} MB, −{_pf:.0f}%)</a>'
                 )
-            _links_html += '</div>'
-            st.markdown(_links_html, unsafe_allow_html=True)
-            st.caption("Links open in a new tab — use your browser's Save As to download.")
+            _dl_html += '</div>'
+            _stc.html(_dl_html, height=_dl_h)
         else:
             st.warning("Download links unavailable. Files may have been cleaned up — please compress again.")
 
@@ -1583,24 +1594,40 @@ if st.session_state.active_tab == "convert":
                 else:
                     st.markdown(f"**{res}** — {file_size:.1f} MB")
 
-        # Copy exports to static dir then show links — no bytes in Python RAM
+        # Copy exports to static dir then render download links in a raw-HTML
+        # iframe so `download` attribute is honoured — instant save dialog.
         st.markdown("#### 📥 Download")
-        _conv_links_html = '<div class="dl-link-wrap">'
+        import math as _math
+        _conv_items = []
         for out_file in output_files:
             try:
                 shutil.copy2(out_file, STATIC_SESS_DIR / out_file.name)
                 _url = f"/app/static/sessions/{_sess}/{out_file.name}"
                 _res_label = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
                 _sz = out_file.stat().st_size / 1_000_000
-                _conv_links_html += (
-                    f'<a href="{_url}" target="_blank" class="dl-link-btn">'
-                    f'⬇&nbsp;{_res_label}&nbsp;({_sz:.1f}&nbsp;MB)</a>'
-                )
+                _conv_items.append((_url, out_file.name, _res_label, _sz))
             except Exception as _exc:
                 log.error("Static copy failed for %s: %s", out_file.name, _exc)
-        _conv_links_html += '</div>'
-        st.markdown(_conv_links_html, unsafe_allow_html=True)
-        st.caption("Links open in a new tab — use your browser's Save As to download.")
+        if _conv_items:
+            _cv_rows = _math.ceil(len(_conv_items) / 3)
+            _cv_h    = max(60, _cv_rows * 56 + 16)
+            _cv_html = """<style>
+body{margin:0;padding:0;background:transparent}
+.wrap{display:flex;flex-wrap:wrap;gap:10px;padding:4px 0}
+a.btn{display:inline-flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#2563eb,#3b82f6);color:#fff;
+  font-weight:700;font-size:14px;font-family:sans-serif;border-radius:10px;
+  padding:11px 22px;text-decoration:none;white-space:nowrap;
+  box-shadow:0 4px 16px rgba(59,130,246,.35);cursor:pointer}
+a.btn:hover{filter:brightness(1.12)}
+</style><div class="wrap">"""
+            for _url, _fname, _label, _sz in _conv_items:
+                _cv_html += (
+                    f'<a href="{_url}" download="{_fname}" class="btn">'
+                    f'⬇ {_label} ({_sz:.1f} MB)</a>'
+                )
+            _cv_html += '</div>'
+            _stc.html(_cv_html, height=_cv_h)
 
         # ── Post-download actions ──────────────────────────────────────────
         st.markdown("---")
