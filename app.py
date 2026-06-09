@@ -87,6 +87,26 @@ PREVIEW_DIR = _BASE_IO_DIR / "sessions" / _sess / "previews"
 for _d in (INPUT_DIR, OUTPUT_DIR, PREVIEW_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+# ── Static file serving: files written here are served at /app/static/… ─────
+# This lets downloads bypass Streamlit's Python process RAM entirely.
+STATIC_SESS_DIR = BASE_DIR / "static" / "sessions" / _sess
+STATIC_SESS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Sweep old session static dirs (> 2 h) to keep disk usage low
+import time as _time
+_static_sessions_root = BASE_DIR / "static" / "sessions"
+try:
+    _now_ts = _time.time()
+    for _old_sdir in _static_sessions_root.iterdir():
+        if _old_sdir.name != _sess and _old_sdir.is_dir():
+            try:
+                if _now_ts - _old_sdir.stat().st_mtime > 7200:
+                    shutil.rmtree(_old_sdir, ignore_errors=True)
+            except Exception:
+                pass
+except Exception:
+    pass
+
 # ── Keepalive: ping Streamlit's health endpoint every 30 s to prevent sleep ───
 import streamlit.components.v1 as _stc
 _stc.html("""
@@ -99,7 +119,7 @@ _stc.html("""
     setInterval(ping, 30000);
 })();
 </script>
-""", height=0)
+""", height=1)
 
 # ── Global colour theme ────────────────────────────────────────────────────────
 st.markdown("""
@@ -359,6 +379,23 @@ h1, h2, h3, h4, h5, h6 { color: #f1f5f9 !important; }
 
 /* ── Dividers ────────────────────────────────────────────────────────────── */
 hr { border-color: #1e3a5f !important; }
+
+/* ── Static-served download links (look like primary buttons) ────────────── */
+.dl-link-wrap { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 4px; }
+.dl-link-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #2563eb, #3b82f6);
+    color: #ffffff !important; font-weight: 700; font-size: 0.88rem;
+    border-radius: 10px; padding: 11px 22px; text-decoration: none !important;
+    box-shadow: 0 4px 16px rgba(59,130,246,0.35);
+    transition: filter 0.15s ease, box-shadow 0.15s ease;
+    white-space: nowrap;
+}
+.dl-link-btn:hover {
+    filter: brightness(1.12);
+    box-shadow: 0 6px 22px rgba(59,130,246,0.55);
+    color: #ffffff !important; text-decoration: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -949,20 +986,25 @@ if st.session_state.active_tab == "compress":
             status.empty()
 
             if _comp_outputs:
-                # Build ZIP once now — store path so results section never recreates it
-                _zip_path_str = None
-                if len(_comp_outputs) > 1:
-                    try:
-                        _zp = zip_outputs([Path(p) for p, _, _ in _comp_outputs], OUTPUT_DIR)
-                        _zip_path_str = str(_zp)
-                    except Exception as exc:
-                        log.error("ZIP creation failed: %s", exc)
+                # Copy outputs to static dir so downloads bypass Python RAM
+                _static_urls = []
+                for _cp_str, _cp_o, _cp_n in _comp_outputs:
+                    _cp = Path(_cp_str)
+                    if _cp.exists():
+                        try:
+                            shutil.copy2(_cp, STATIC_SESS_DIR / _cp.name)
+                            _static_urls.append((
+                                f"/app/static/sessions/{_sess}/{_cp.name}",
+                                _cp.name, _cp_o, _cp_n,
+                            ))
+                        except Exception as _exc:
+                            log.error("Static copy failed for %s: %s", _cp.name, _exc)
 
                 st.session_state.comp_results = {
                     "outputs":       _comp_outputs,
                     "total_orig_mb": total_orig_mb,
                     "total_new_mb":  _total_new_mb,
-                    "zip_path":      _zip_path_str,
+                    "static_urls":   _static_urls,
                 }
             st.rerun()
 
@@ -977,74 +1019,31 @@ if st.session_state.active_tab == "compress":
         st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
         st.markdown("#### 📥 Download")
 
-        # File-by-file navigator — only ONE file is loaded into RAM at a time.
-        # Loading all files (or a large ZIP) simultaneously causes OOM on cloud.
-        _dl_idx = _res.get("dl_idx", 0)
-        _valid  = [(p, o, n) for p, o, n in _outputs if Path(p).exists()]
+        # Summary list (no bytes loaded — just display metadata)
+        for path_str, orig_mb, new_mb in _outputs:
+            _p   = Path(path_str)
+            _pf  = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
+            _ico = "✓" if _p.exists() else "✗"
+            st.caption(f"{_ico}  {_p.name}  —  {new_mb:.1f} MB  (−{_pf:.0f}%)")
 
-        if not _valid:
-            st.warning("Output files no longer available. Please compress again.")
-        else:
-            # Clamp index
-            _dl_idx = min(_dl_idx, len(_valid) - 1)
+        st.markdown("---")
 
-            # Summary list
-            for path_str, orig_mb, new_mb in _outputs:
-                _p   = Path(path_str)
-                _pf  = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
-                _ico = "✓" if _p.exists() else "✗"
-                st.caption(f"{_ico}  {_p.name}  —  {new_mb:.1f} MB  (-{_pf:.0f}%)")
-
-            st.markdown("---")
-
-            if len(_valid) == 1:
-                # Only one file — serve it directly
-                _p, _o, _n = _valid[0]
-                _p = Path(_p)
-                _pf   = ((_o - _n) / _o * 100) if _o else 0
-                _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
-                st.download_button(
-                    label=f"⬇ {_p.name}  ({_n:.1f} MB, -{_pf:.0f}%)",
-                    data=open(_p, "rb"),
-                    file_name=_p.name,
-                    mime=_mime,
-                    key="comp_dl_single",
+        # Static download links — files served directly by Streamlit's static
+        # file server. Zero bytes loaded into Python RAM.
+        _static_urls = _res.get("static_urls", [])
+        if _static_urls:
+            _links_html = '<div class="dl-link-wrap">'
+            for _url, _fname, _o, _n in _static_urls:
+                _pf = ((_o - _n) / _o * 100) if _o else 0
+                _links_html += (
+                    f'<a href="{_url}" target="_blank" class="dl-link-btn">'
+                    f'⬇&nbsp;{_fname}&nbsp;({_n:.1f}&nbsp;MB,&nbsp;−{_pf:.0f}%)</a>'
                 )
-            else:
-                # Multiple files — show navigator (one file in RAM at a time)
-                _cur_path, _cur_o, _cur_n = _valid[_dl_idx]
-                _cur_p  = Path(_cur_path)
-                _cur_pf = ((_cur_o - _cur_n) / _cur_o * 100) if _cur_o else 0
-                _mime   = "image/gif" if _cur_p.suffix.lower() == ".gif" else "video/mp4"
-
-                st.markdown(f"**File {_dl_idx + 1} of {len(_valid)}** — {_cur_p.name}")
-                _dc1, _dc2, _dc3 = st.columns([3, 1, 1])
-                with _dc1:
-                    st.download_button(
-                        label=f"⬇ Download  ({_cur_n:.1f} MB, -{_cur_pf:.0f}%)",
-                        data=open(_cur_p, "rb"),
-                        file_name=_cur_p.name,
-                        mime=_mime,
-                        key="comp_dl_nav",
-                        use_container_width=True,
-                        type="primary",
-                    )
-                with _dc2:
-                    _prev_off = _dl_idx == 0
-                    if st.button("◀ Prev", key="comp_dl_prev",
-                                 use_container_width=True,
-                                 disabled=_prev_off):
-                        _res["dl_idx"] = _dl_idx - 1
-                        st.session_state.comp_results = _res
-                        st.rerun()
-                with _dc3:
-                    _next_off = _dl_idx >= len(_valid) - 1
-                    if st.button("Next ▶", key="comp_dl_next",
-                                 use_container_width=True,
-                                 disabled=_next_off):
-                        _res["dl_idx"] = _dl_idx + 1
-                        st.session_state.comp_results = _res
-                        st.rerun()
+            _links_html += '</div>'
+            st.markdown(_links_html, unsafe_allow_html=True)
+            st.caption("Links open in a new tab — use your browser's Save As to download.")
+        else:
+            st.warning("Download links unavailable. Files may have been cleaned up — please compress again.")
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
@@ -1584,30 +1583,24 @@ if st.session_state.active_tab == "convert":
                 else:
                     st.markdown(f"**{res}** — {file_size:.1f} MB")
 
-        # Download buttons
+        # Copy exports to static dir then show links — no bytes in Python RAM
         st.markdown("#### 📥 Download")
-        dl_cols = st.columns(min(len(output_files), 4))
-        for idx, out_file in enumerate(output_files):
-            res = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
-            with dl_cols[idx % 4]:
-                st.download_button(
-                    label=f"⬇ {res}",
-                    data=out_file.read_bytes(),
-                    file_name=out_file.name,
-                    mime="video/mp4",
-                    key=f"dl_{idx}",
-                    use_container_width=True,
+        _conv_links_html = '<div class="dl-link-wrap">'
+        for out_file in output_files:
+            try:
+                shutil.copy2(out_file, STATIC_SESS_DIR / out_file.name)
+                _url = f"/app/static/sessions/{_sess}/{out_file.name}"
+                _res_label = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
+                _sz = out_file.stat().st_size / 1_000_000
+                _conv_links_html += (
+                    f'<a href="{_url}" target="_blank" class="dl-link-btn">'
+                    f'⬇&nbsp;{_res_label}&nbsp;({_sz:.1f}&nbsp;MB)</a>'
                 )
-
-        if len(output_files) > 1:
-            zip_path = zip_outputs(output_files, OUTPUT_DIR)
-            st.download_button(
-                label="📦 Download All as ZIP",
-                data=zip_path.read_bytes(),
-                file_name=zip_path.name,
-                mime="application/zip",
-                use_container_width=True,
-            )
+            except Exception as _exc:
+                log.error("Static copy failed for %s: %s", out_file.name, _exc)
+        _conv_links_html += '</div>'
+        st.markdown(_conv_links_html, unsafe_allow_html=True)
+        st.caption("Links open in a new tab — use your browser's Save As to download.")
 
         # ── Post-download actions ──────────────────────────────────────────
         st.markdown("---")

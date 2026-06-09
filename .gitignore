@@ -1,28 +1,6 @@
-# Python
+app.log
+sessions/
+static/sessions/
 __pycache__/
 *.pyc
-*.pyo
-venv/
-.venv/
-*.egg-info/
-
-# Build & dist (Mac app)
-build/
-dist/
-*.spec
-
-# Logs & temp
-*.log
-*.bak
-
-# macOS
 .DS_Store
-
-# App runtime files (inputs/outputs/previews change constantly)
-input/
-output/
-previews/
-
-# Model weights (large binary)
-*.pt
-*.onnx
