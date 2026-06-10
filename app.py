@@ -947,7 +947,7 @@ if st.session_state.active_tab == "compress":
                 display_name = comp_input.name.replace("compress_", "")
                 status.markdown(f"Compressing **{display_name}** ({idx+1}/{len(comp_inputs)})…")
                 safe_stem = comp_input.stem.replace("compress_", "")
-                comp_out  = OUTPUT_DIR / f"compressed_{safe_stem}.mp4"
+                comp_out  = OUTPUT_DIR / f"{safe_stem}.mp4"
                 try:
                     is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
                     is_gif   = comp_input.suffix.lower() == ".gif"
@@ -962,7 +962,7 @@ if st.session_state.active_tab == "compress":
                         _run([_FFMPEG_BIN, "-y", "-i", str(comp_input),
                               "-vf", f"fps={fps},palettegen=max_colors={colours}:stats_mode=diff",
                               str(palette)])
-                        comp_out = OUTPUT_DIR / f"compressed_{safe_stem}.gif"
+                        comp_out = OUTPUT_DIR / f"{safe_stem}.gif"
                         _run([_FFMPEG_BIN, "-y",
                               "-i", str(comp_input), "-i", str(palette),
                               "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
@@ -986,25 +986,19 @@ if st.session_state.active_tab == "compress":
             status.empty()
 
             if _comp_outputs:
-                # Copy outputs to static dir so downloads bypass Python RAM
-                _static_urls = []
-                for _cp_str, _cp_o, _cp_n in _comp_outputs:
-                    _cp = Path(_cp_str)
-                    if _cp.exists():
-                        try:
-                            shutil.copy2(_cp, STATIC_SESS_DIR / _cp.name)
-                            _static_urls.append((
-                                f"/app/static/sessions/{_sess}/{_cp.name}",
-                                _cp.name, _cp_o, _cp_n,
-                            ))
-                        except Exception as _exc:
-                            log.error("Static copy failed for %s: %s", _cp.name, _exc)
+                _zip_path_str = None
+                if len(_comp_outputs) > 1:
+                    try:
+                        _zp = zip_outputs([Path(p) for p, _, _ in _comp_outputs], OUTPUT_DIR)
+                        _zip_path_str = str(_zp)
+                    except Exception as _exc:
+                        log.error("ZIP creation failed: %s", _exc)
 
                 st.session_state.comp_results = {
                     "outputs":       _comp_outputs,
                     "total_orig_mb": total_orig_mb,
                     "total_new_mb":  _total_new_mb,
-                    "static_urls":   _static_urls,
+                    "zip_path":      _zip_path_str,
                 }
             st.rerun()
 
@@ -1028,58 +1022,38 @@ if st.session_state.active_tab == "compress":
 
         st.markdown("---")
 
-        # File-by-file navigator: one file in RAM at a time to avoid OOM.
-        _dl_idx = _res.get("dl_idx", 0)
-        _valid  = [(p, o, n) for p, o, n in _outputs if Path(p).exists()]
+        _valid = [(p, o, n) for p, o, n in _outputs if Path(p).exists()]
         if not _valid:
             st.warning("Output files no longer available. Please compress again.")
         else:
-            _dl_idx = min(_dl_idx, len(_valid) - 1)
-            if len(_valid) == 1:
-                _p, _o, _n = _valid[0]
-                _p = Path(_p)
-                _pf   = ((_o - _n) / _o * 100) if _o else 0
-                _mime = "image/gif" if _p.suffix.lower() == ".gif" else "video/mp4"
+            # Individual download button for every file
+            _dl_cols = st.columns(min(len(_valid), 3))
+            for _vi, (_vp, _vo, _vn) in enumerate(_valid):
+                _vp = Path(_vp)
+                _vpf  = ((_vo - _vn) / _vo * 100) if _vo else 0
+                _mime = "image/gif" if _vp.suffix.lower() == ".gif" else "video/mp4"
+                with _dl_cols[_vi % 3]:
+                    st.download_button(
+                        label=f"⬇ {_vp.name}  ({_vn:.1f} MB, −{_vpf:.0f}%)",
+                        data=open(_vp, "rb"),
+                        file_name=_vp.name,
+                        mime=_mime,
+                        key=f"comp_dl_{_vi}",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+            # ZIP button when there are multiple files
+            _zip_path = _res.get("zip_path")
+            if _zip_path and Path(_zip_path).exists():
                 st.download_button(
-                    label=f"⬇ {_p.name}  ({_n:.1f} MB, −{_pf:.0f}%)",
-                    data=open(_p, "rb"),
-                    file_name=_p.name,
-                    mime=_mime,
-                    key="comp_dl_single",
-                    type="primary",
+                    label="📦 Download All as ZIP",
+                    data=open(_zip_path, "rb"),
+                    file_name=Path(_zip_path).name,
+                    mime="application/zip",
+                    key="comp_dl_zip",
                     use_container_width=True,
                 )
-            else:
-                _cur_path, _cur_o, _cur_n = _valid[_dl_idx]
-                _cur_p  = Path(_cur_path)
-                _cur_pf = ((_cur_o - _cur_n) / _cur_o * 100) if _cur_o else 0
-                _mime   = "image/gif" if _cur_p.suffix.lower() == ".gif" else "video/mp4"
-                st.markdown(f"**File {_dl_idx + 1} of {len(_valid)}** — {_cur_p.name}")
-                _dc1, _dc2, _dc3 = st.columns([3, 1, 1])
-                with _dc1:
-                    st.download_button(
-                        label=f"⬇ Download  ({_cur_n:.1f} MB, −{_cur_pf:.0f}%)",
-                        data=open(_cur_p, "rb"),
-                        file_name=_cur_p.name,
-                        mime=_mime,
-                        key="comp_dl_nav",
-                        use_container_width=True,
-                        type="primary",
-                    )
-                with _dc2:
-                    if st.button("◀ Prev", key="comp_dl_prev",
-                                 use_container_width=True,
-                                 disabled=(_dl_idx == 0)):
-                        _res["dl_idx"] = _dl_idx - 1
-                        st.session_state.comp_results = _res
-                        st.rerun()
-                with _dc3:
-                    if st.button("Next ▶", key="comp_dl_next",
-                                 use_container_width=True,
-                                 disabled=(_dl_idx >= len(_valid) - 1)):
-                        _res["dl_idx"] = _dl_idx + 1
-                        st.session_state.comp_results = _res
-                        st.rerun()
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
