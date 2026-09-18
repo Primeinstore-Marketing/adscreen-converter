@@ -1523,56 +1523,78 @@ if st.session_state.active_tab == "convert":
         f"{len(effective_templates)} template(s)."
     )
 
-    if not st.button("🚀 Export Now", type="primary", use_container_width=True):
-        st.stop()
+    _export_clicked = st.button("🚀 Export Now", type="primary", use_container_width=True)
 
-    for _old in OUTPUT_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
-    for _old in PREVIEW_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
+    # st.button() is only True on the rerun immediately after its own click, and
+    # clicking a download button also triggers a rerun. Gating the results
+    # section on the button therefore tore down the download widgets mid-
+    # download — the browser's request for the file arrived after the widget
+    # (and its registered data) was gone. Keep the results in session_state so
+    # they survive those reruns.
+    if _export_clicked:
+        for _old in OUTPUT_DIR.iterdir():
+            try:
+                _old.unlink()
+            except Exception:
+                pass
+        for _old in PREVIEW_DIR.iterdir():
+            try:
+                _old.unlink()
+            except Exception:
+                pass
 
-    output_files: list[Path] = []
-    errors: list[str]        = []
+        output_files: list[Path] = []
+        errors: list[str]        = []
 
-    progress_bar = st.progress(0)
-    status_text  = st.empty()
-    total        = len(all_export_jobs)
+        progress_bar = st.progress(0)
+        status_text  = st.empty()
+        total        = len(all_export_jobs)
 
-    for i, (tmpl, plan) in enumerate(all_export_jobs):
-        file_label = plan.label if plan.label else tmpl.name.replace(' ', '_')
-        out = OUTPUT_DIR / f"{file_label}_{plan.width}x{plan.height}.mp4"
-        status_text.markdown(
-            f"⏳ Exporting **{tmpl.name}** — {plan.width}×{plan.height}  ({i+1}/{total})…"
-        )
-
-        try:
-            export_format(
-                src=input_path,
-                dst=out,
-                width=plan.width,
-                height=plan.height,
-                crop_x=plan.crop_x,
-                crop_y=plan.crop_y,
-                crf=crf,
-                preset=preset,
-                resize_mode=resize_mode_key,
+        for i, (tmpl, plan) in enumerate(all_export_jobs):
+            file_label = plan.label if plan.label else tmpl.name.replace(' ', '_')
+            out = OUTPUT_DIR / f"{file_label}_{plan.width}x{plan.height}.mp4"
+            status_text.markdown(
+                f"⏳ Exporting **{tmpl.name}** — {plan.width}×{plan.height}  ({i+1}/{total})…"
             )
-            output_files.append(out)
-            log.info("Exported %s", out.name)
-        except RuntimeError as exc:
-            err_msg = f"{tmpl.name} {plan.width}×{plan.height}: {exc}"
-            errors.append(err_msg)
-            log.error(err_msg)
 
-        progress_bar.progress((i + 1) / total)
+            try:
+                export_format(
+                    src=input_path,
+                    dst=out,
+                    width=plan.width,
+                    height=plan.height,
+                    crop_x=plan.crop_x,
+                    crop_y=plan.crop_y,
+                    crf=crf,
+                    preset=preset,
+                    resize_mode=resize_mode_key,
+                )
+                output_files.append(out)
+                log.info("Exported %s", out.name)
+            except RuntimeError as exc:
+                err_msg = f"{tmpl.name} {plan.width}×{plan.height}: {exc}"
+                errors.append(err_msg)
+                log.error(err_msg)
 
-    status_text.empty()
+            progress_bar.progress((i + 1) / total)
+
+        status_text.empty()
+
+        st.session_state.export_results = {
+            "files":  [str(p) for p in output_files],
+            "errors": errors,
+            "total":  total,
+            "zip":    None,
+        }
+    else:
+        _prev = st.session_state.get("export_results")
+        if not _prev:
+            st.stop()
+        output_files = [Path(p) for p in _prev["files"] if Path(p).exists()]
+        errors       = list(_prev["errors"])
+        total        = _prev["total"]
+        if not output_files:
+            st.stop()
 
     # ── Results ────────────────────────────────────
     st.markdown("---")
@@ -1602,17 +1624,27 @@ if st.session_state.active_tab == "convert":
             with dl_cols[idx % 4]:
                 st.download_button(
                     label=f"⬇ {_res_label} ({_sz:.1f} MB)",
-                    data=open(out_file, "rb"),
+                    data=out_file.read_bytes(),
                     file_name=out_file.name,
                     mime="video/mp4",
                     key=f"dl_{idx}",
                     use_container_width=True,
                 )
         if len(output_files) > 1:
-            zip_path = zip_outputs(output_files, OUTPUT_DIR)
+            # Build the ZIP once per export. zip_outputs() names the file with a
+            # timestamp, so rebuilding it on every rerun moved the target out
+            # from under the download token. Mirrors the compress tab's fix.
+            _res = st.session_state.get("export_results") or {}
+            _cached_zip = _res.get("zip")
+            if _cached_zip and Path(_cached_zip).exists():
+                zip_path = Path(_cached_zip)
+            else:
+                zip_path = zip_outputs(output_files, OUTPUT_DIR)
+                _res["zip"] = str(zip_path)
+                st.session_state.export_results = _res
             st.download_button(
                 label="📦 Download All as ZIP",
-                data=open(zip_path, "rb"),
+                data=zip_path.read_bytes(),
                 file_name=zip_path.name,
                 mime="application/zip",
                 use_container_width=True,
@@ -1638,7 +1670,7 @@ if st.session_state.active_tab == "convert":
             if st.button("🗑️ Start Fresh", type="secondary",
                          use_container_width=True, key="next_start_fresh"):
                 for _k in ["selected_keys", "custom_formats", "ae_template",
-                            "compress_queued_files"]:
+                            "compress_queued_files", "export_results"]:
                     st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.session_state.compress_key += 1
