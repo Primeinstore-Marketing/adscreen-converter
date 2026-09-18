@@ -337,118 +337,70 @@ if "welcomed" not in st.session_state:
     st.session_state.welcomed = False
 
 if not st.session_state.welcomed:
-    _logo_path = BASE_DIR / "img" / "logo_white.png"
-
     import base64 as _b64
-    _logo_b64 = ""
+    _logo_path = BASE_DIR / "img" / "logo_white.png"
+    _logo_tag = ""
     if _logo_path.exists():
-        _logo_b64 = _b64.b64encode(_logo_path.read_bytes()).decode()
-
-    _logo_tag = f"<img src='data:image/png;base64,{_logo_b64}' style='max-width:220px;width:100%;display:block;margin:0 auto 20px' />" if _logo_b64 else ""
+        _b = _b64.b64encode(_logo_path.read_bytes()).decode()
+        _logo_tag = (f"<img src='data:image/png;base64,{_b}' alt='Primedia Malls' "
+                     "style='max-width:180px;width:100%;display:block;margin:0 auto 28px' />")
 
     st.markdown(f"""
 <style>
-[data-testid="stAppViewContainer"] {{ background: #0d1b2e !important; }}
-[data-testid="stHeader"]  {{ background: transparent !important; border: none !important; }}
-[data-testid="stSidebar"] {{ display: none !important; }}
-
-/* Vertically centre the content area */
-[data-testid="stMainBlockContainer"] {{
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    min-height: 95vh !important;
-    padding: 20px !important;
+[data-testid="stSidebar"] {{ display: none; }}
+[data-testid="stMainBlockContainer"] {{ max-width: 720px; padding-top: 8vh; }}
+.w-eyebrow {{
+    color: var(--c-text-muted); font-size: .76rem; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; text-align: center;
 }}
-
-/* Style the block container itself as the card */
-[data-testid="stMainBlockContainer"] > .block-container {{
-    background: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 20px !important;
-    padding: 44px 52px 40px !important;
-    max-width: 560px !important;
-    width: 100% !important;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.55) !important;
-    text-align: center !important;
+.w-title {{
+    color: var(--c-text); font-size: 2.1rem; font-weight: 700;
+    letter-spacing: -.025em; text-align: center; margin: var(--s-3) 0 var(--s-2);
 }}
-
-.wdivider {{
-    width: 48px; height: 3px;
-    background: linear-gradient(90deg, #3b82f6, #60a5fa);
-    border-radius: 2px; margin: 12px auto 16px;
+.w-sub {{
+    color: var(--c-text-secondary); font-size: .96rem; text-align: center;
+    max-width: 46ch; margin: 0 auto var(--s-6);
 }}
-.weyebrow {{
-    font-size: 0.72rem; font-weight: 600; color: #93c5fd;
-    letter-spacing: 0.22em; text-transform: uppercase;
+.w-feats {{
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s-3);
+    margin-top: var(--s-6);
 }}
-.wtitle {{
-    font-size: 2rem; font-weight: 800; color: #f1f5f9;
-    letter-spacing: -0.5px; margin: 0 0 28px; line-height: 1.1;
+.w-feat {{
+    background: var(--c-surface); border: 1px solid var(--c-border);
+    border-radius: var(--r-card); padding: var(--s-4);
 }}
-.wfeats {{
-    display: flex; gap: 10px; flex-wrap: wrap;
-    justify-content: center; margin-top: 20px;
-}}
-.wfeat {{
-    background: #142034; border: 1px solid #2d5f9e;
-    border-radius: 10px; padding: 12px 10px;
-    flex: 1; min-width: 100px; max-width: 130px;
-}}
-.wfeat-icon {{ font-size: 1.3rem; margin-bottom: 5px; }}
-.wfeat-lbl  {{ font-size: 0.73rem; color: #f1f5f9; font-weight: 600; line-height: 1.3; }}
-.wfeat-desc {{ font-size: 0.66rem; color: #aac4e8; margin-top: 3px; line-height: 1.3; }}
-
-/* Welcome CTA button — white, centred, bold */
-.welcome-btn [data-testid="stButton"] {{
-    display: flex !important;
-    justify-content: center !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] {{
-    background: #ffffff !important;
-    color: #0d1b2e !important;
-    border: none !important;
-    font-weight: 800 !important;
-    font-size: 1.05rem !important;
-    letter-spacing: 0.02em !important;
-    padding: 16px 48px !important;
-    border-radius: 50px !important;
-    width: auto !important;
-    min-width: 240px !important;
-    box-shadow: 0 4px 20px rgba(255,255,255,0.15) !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] p,
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] span {{
-    color: #0d1b2e !important;
-    font-weight: 800 !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"]:hover {{
-    background: #e2e8f0 !important;
-    box-shadow: 0 6px 28px rgba(255,255,255,0.25) !important;
+.w-feat-lbl  {{ color: var(--c-text); font-weight: 600; font-size: .9rem; }}
+.w-feat-desc {{ color: var(--c-text-muted); font-size: .82rem; margin-top: 2px; }}
+@media (max-width: 640px) {{
+    .w-feats {{ grid-template-columns: 1fr; }}
+    .w-title {{ font-size: 1.6rem; }}
 }}
 </style>
 
-<div style="text-align:center">
-  {_logo_tag}
-  <div class="weyebrow">Powered by Primedia Out of Home</div>
-  <div class="wdivider"></div>
-  <div class="wtitle">AdScreen Converter</div>
-</div>
+{_logo_tag}
+<div class="w-eyebrow">Primedia Out of Home</div>
+<div class="w-title">AdScreen Converter</div>
+<div class="w-sub">Export one master file to every mall screen format — correctly
+sized, cropped and compressed.</div>
 """, unsafe_allow_html=True)
 
-    st.markdown('<div class="welcome-btn">', unsafe_allow_html=True)
-    col_a, col_b, col_c = st.columns([1, 1, 1])
-    with col_b:
-        if st.button("✦  Let's Get Started", type="primary", use_container_width=True):
+    _wa, _wb, _wc = st.columns([1, 1.4, 1])
+    with _wb:
+        if st.button("Get started", type="primary", use_container_width=True,
+                     key="welcome_start"):
             st.session_state.welcomed = True
             st.rerun()
-    
+
     st.markdown("""
-<div class="wfeats">
-  <div class="wfeat"><div class="wfeat-icon">🖥️</div><div class="wfeat-lbl">Multi-Format Export</div><div class="wfeat-desc">All screen sizes in one click</div></div>
-  <div class="wfeat"><div class="wfeat-icon">🧠</div><div class="wfeat-lbl">Smart Crop AI</div><div class="wfeat-desc">Keeps faces &amp; logos in frame</div></div>
-  <div class="wfeat"><div class="wfeat-icon">📦</div><div class="wfeat-lbl">Compression</div><div class="wfeat-desc">Smaller files, same quality</div></div>
-  <div class="wfeat"><div class="wfeat-icon">📐</div><div class="wfeat-lbl">Custom Sizes</div><div class="wfeat-desc">Any ratio or resolution</div></div>
+<div class="w-feats">
+  <div class="w-feat"><div class="w-feat-lbl">Multi-format export</div>
+    <div class="w-feat-desc">Every selected screen size in one run</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Smart crop</div>
+    <div class="w-feat-desc">Keeps the busiest part of the frame in shot</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Compression</div>
+    <div class="w-feat-desc">Hit a target file size without visible loss</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Custom sizes</div>
+    <div class="w-feat-desc">Any resolution or aspect ratio</div></div>
 </div>
 """, unsafe_allow_html=True)
 
