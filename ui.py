@@ -78,11 +78,15 @@ def _css_vars() -> str:
 
 def inject_theme() -> None:
     """Emit the single stylesheet for the app. Call once, early."""
+    # The <style> tag MUST be the first thing in this string. A markdown HTML
+    # block opened by anything else (e.g. <link>) ends at the first blank line,
+    # after which the rest of the stylesheet is parsed as markdown and rendered
+    # as visible text. A block opened by <style> runs until </style>, so blank
+    # lines between sections are safe. The font is therefore pulled in with
+    # @import rather than <link>.
     st.markdown(f"""
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 :root {{
     {_css_vars()}
 }}
