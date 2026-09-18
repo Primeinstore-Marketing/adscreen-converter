@@ -95,6 +95,23 @@ def inject_theme() -> None:
 html, body, [data-testid="stAppViewContainer"], [class*="st-emotion"] {{
     font-family: {FONT_STACK};
 }}
+/* Streamlit draws icons as Material Symbols ligatures — the span's text content
+   is literally "keyboard_arrow_right". The broad font-family rule above reaches
+   those spans, and once the icon font is gone the ligature cannot resolve, so
+   the raw name prints on top of the label. Restore the icon font explicitly. */
+[data-testid="stIconMaterial"],
+[data-testid="stExpanderIcon"],
+span[class*="material-symbols"],
+span[translate="no"] {{
+    font-family: "Material Symbols Rounded" !important;
+    font-feature-settings: "liga" !important;
+    font-weight: normal !important;
+    letter-spacing: normal !important;
+    text-transform: none !important;
+    white-space: nowrap !important;
+    word-wrap: normal !important;
+    direction: ltr !important;
+}}
 [data-testid="stAppViewContainer"] {{ background: var(--c-bg); }}
 [data-testid="stHeader"]  {{ background: transparent; border: none; }}
 [data-testid="stSidebar"] {{
