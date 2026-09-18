@@ -1,5 +1,7 @@
 
 import streamlit as st
+import ui
+import hashlib
 import json
 import subprocess
 import datetime
@@ -122,282 +124,7 @@ _stc.html("""
 """, height=1)
 
 # ── Global colour theme ────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-/* ── Palette ──────────────────────────────────────────────────────────────────
-   Page bg:        #0d1b2e   deep navy
-   Sidebar bg:     #102540   slightly lighter
-   Panel / card:   #1a3350   medium navy
-   Input bg:       #1e3a5f   lighter navy
-   Border:         #2d5f9e   blue border
-   Accent:         #3b82f6   bright blue
-   Text primary:   #f1f5f9   near-white  (high contrast on dark)
-   Text secondary: #cbd5e1   light grey  (readable on dark)
-   Text muted:     #94a3b8   medium grey
-   Dropdown:       #ffffff   white bg / dark text
-   ──────────────────────────────────────────────────────────────────────────── */
-
-/* ── Page background ─────────────────────────────────────────────────────── */
-[data-testid="stAppViewContainer"],
-[data-testid="stAppViewContainer"] > .main {
-    background-color: #0d1b2e !important;
-}
-
-/* ── Main content text ───────────────────────────────────────────────────── */
-h1, h2, h3, h4, h5, h6 { color: #f1f5f9 !important; }
-/* Scope general text colour to the app container only — NOT dropdowns */
-[data-testid="stAppViewContainer"] p,
-[data-testid="stAppViewContainer"] label,
-[data-testid="stAppViewContainer"] .stMarkdown li { color: #cbd5e1; }
-[data-testid="stCaption"] { color: #94a3b8 !important; }
-[data-testid="stText"]    { color: #cbd5e1 !important; }
-
-/* ── Header bar ──────────────────────────────────────────────────────────── */
-[data-testid="stHeader"] {
-    background-color: #0d1b2e !important;
-    border-bottom: 1px solid #1e3a5f !important;
-}
-
-/* ── Sidebar ─────────────────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background-color: #102540 !important;
-    border-right: 1px solid #2d5f9e !important;
-}
-[data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 { color: #f1f5f9 !important; }
-[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] span,
-[data-testid="stSidebar"] div { color: #cbd5e1 !important; }
-[data-testid="stSidebar"] .stMarkdown hr { border-color: #2d5f9e !important; }
-
-/* ── Tabs ────────────────────────────────────────────────────────────────── */
-[data-testid="stTabs"] [data-baseweb="tab-list"] {
-    background-color: #1a3350 !important;
-    border-radius: 8px !important;
-    padding: 4px !important;
-    gap: 4px !important;
-}
-[data-testid="stTabs"] [data-baseweb="tab"] {
-    color: #94a3b8 !important;
-    border-radius: 6px !important;
-    font-weight: 600 !important;
-}
-[data-testid="stTabs"] [aria-selected="true"] {
-    background-color: #2d5f9e !important;
-    color: #f1f5f9 !important;
-}
-
-/* ── Buttons ─────────────────────────────────────────────────────────────── */
-[data-testid="stButton"] > button[kind="primary"] {
-    background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
-    border: none !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-    border-radius: 10px !important;
-    box-shadow: 0 4px 16px rgba(59,130,246,0.35) !important;
-}
-[data-testid="stButton"] > button[kind="primary"] p,
-[data-testid="stButton"] > button[kind="primary"] span {
-    color: #ffffff !important;
-    font-weight: 700 !important;
-}
-[data-testid="stButton"] > button[kind="primary"]:hover {
-    box-shadow: 0 6px 22px rgba(59,130,246,0.55) !important;
-    filter: brightness(1.1) !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] {
-    background: #1a3350 !important;
-    border: 1px solid #3b82f6 !important;
-    color: #93c5fd !important;
-    font-weight: 600 !important;
-    border-radius: 10px !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] p,
-[data-testid="stButton"] > button[kind="secondary"] span {
-    color: #93c5fd !important;
-}
-
-/* ── Nav buttons — fixed height so they never resize on tab switch ────────── */
-[data-testid="stButton"][data-key="nav_convert"] > button,
-[data-testid="stButton"][data-key="nav_compress"] > button {
-    height: 48px !important;
-    min-height: 48px !important;
-    max-height: 48px !important;
-    white-space: nowrap !important;
-    text-align: center !important;
-    font-size: 0.95rem !important;
-    padding: 0 28px !important;
-}
-[data-testid="stButton"][data-key="nav_convert"] > button p,
-[data-testid="stButton"][data-key="nav_convert"] > button span,
-[data-testid="stButton"][data-key="nav_compress"] > button p,
-[data-testid="stButton"][data-key="nav_compress"] > button span {
-    text-align: center !important;
-    white-space: nowrap !important;
-    color: inherit !important;
-}
-[data-testid="stButton"] > button[kind="secondary"]:hover {
-    background: #1e3a5f !important;
-}
-
-/* ── Text / Number inputs ────────────────────────────────────────────────── */
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    color: #f1f5f9 !important;
-    border-radius: 6px !important;
-}
-[data-testid="stTextInput"] input::placeholder,
-[data-testid="stNumberInput"] input::placeholder { color: #94a3b8 !important; }
-[data-testid="stTextInput"] label,
-[data-testid="stNumberInput"] label { color: #cbd5e1 !important; }
-[data-testid="stNumberInput"] > div {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-}
-[data-testid="stNumberInput"] button {
-    background-color: #2d5f9e !important;
-    border-color: #2d5f9e !important;
-    color: #ffffff !important;
-}
-[data-testid="stNumberInput"] button:hover { background-color: #3b82f6 !important; }
-
-/* ── Selectbox ───────────────────────────────────────────────────────────── */
-[data-testid="stSelectbox"] label { color: #cbd5e1 !important; }
-[data-testid="stSelectbox"] div[data-baseweb="select"] {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-}
-[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-    background-color: #1e3a5f !important;
-    color: #f1f5f9 !important;
-}
-
-/* ── Multiselect ─────────────────────────────────────────────────────────── */
-[data-testid="stMultiSelect"] label { color: #cbd5e1 !important; }
-
-/* Outer wrapper — one unified dark box */
-[data-testid="stMultiSelect"] div[data-baseweb="select"],
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div > div {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-    color: #f1f5f9 !important;
-}
-/* Remove any inner borders that create a double-box look */
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
-    border: none !important;
-}
-/* Search input inside the box */
-[data-testid="stMultiSelect"] input {
-    background-color: #1e3a5f !important;
-    color: #f1f5f9 !important;
-    border: none !important;
-    outline: none !important;
-}
-[data-testid="stMultiSelect"] input::placeholder { color: #94a3b8 !important; }
-/* Selected tags */
-[data-testid="stMultiSelect"] [data-baseweb="tag"] {
-    background-color: #2d5f9e !important;
-    color: #ffffff !important;
-    border-radius: 4px !important;
-}
-[data-testid="stMultiSelect"] [data-baseweb="tag"] span,
-[data-testid="stMultiSelect"] [data-baseweb="tag"] svg { color: #ffffff !important; }
-
-/* ── Dropdown popover (white bg, dark readable text) ─────────────────────── */
-[data-baseweb="popover"],
-[data-baseweb="popover"] ul,
-[data-baseweb="menu"] {
-    background-color: #ffffff !important;
-    border: 1px solid #cbd5e1 !important;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.18) !important;
-    border-radius: 8px !important;
-}
-/* Every element inside the popover gets dark text */
-[data-baseweb="popover"] *,
-[data-baseweb="menu"] *,
-[role="listbox"] *,
-[role="option"] * {
-    color: #1e293b !important;
-    background-color: transparent !important;
-}
-/* Row backgrounds */
-[data-baseweb="menu"] li,
-[data-baseweb="option"],
-[role="option"] {
-    background-color: #ffffff !important;
-    font-weight: 500 !important;
-}
-[data-baseweb="menu"] li:hover,
-[data-baseweb="option"]:hover,
-[role="option"]:hover {
-    background-color: #dbeafe !important;
-}
-
-/* ── Slider ──────────────────────────────────────────────────────────────── */
-[data-testid="stSlider"] label { color: #cbd5e1 !important; }
-[data-testid="stSlider"] [data-testid="stTickBarMin"],
-[data-testid="stSlider"] [data-testid="stTickBarMax"] { color: #94a3b8 !important; }
-
-/* ── Toggle ──────────────────────────────────────────────────────────────── */
-[data-testid="stToggle"] label,
-[data-testid="stToggle"] p { color: #cbd5e1 !important; }
-
-/* ── File uploader ───────────────────────────────────────────────────────── */
-[data-testid="stFileUploader"] {
-    background-color: #1a3350 !important;
-    border: 2px dashed #2d5f9e !important;
-    border-radius: 10px !important;
-}
-[data-testid="stFileUploader"] label,
-[data-testid="stFileUploader"] span,
-[data-testid="stFileUploader"] p { color: #cbd5e1 !important; }
-[data-testid="stFileUploader"] button { color: #93c5fd !important; }
-
-/* ── Expanders ───────────────────────────────────────────────────────────── */
-[data-testid="stExpander"] {
-    background-color: #1a3350 !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 8px !important;
-}
-[data-testid="stExpander"] summary { color: #f1f5f9 !important; font-weight: 600 !important; }
-[data-testid="stExpander"] summary p { color: #f1f5f9 !important; }
-
-/* ── Alert / info boxes ──────────────────────────────────────────────────── */
-[data-testid="stAlert"] { border-radius: 8px !important; }
-[data-testid="stAlert"] p { color: inherit !important; }
-
-/* ── Progress / spinner ──────────────────────────────────────────────────── */
-[data-testid="stProgress"] > div > div { background-color: #3b82f6 !important; }
-
-/* ── Dividers ────────────────────────────────────────────────────────────── */
-hr { border-color: #1e3a5f !important; }
-
-/* ── Static-served download links (look like primary buttons) ────────────── */
-.dl-link-wrap { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 4px; }
-.dl-link-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    background: linear-gradient(135deg, #2563eb, #3b82f6);
-    color: #ffffff !important; font-weight: 700; font-size: 0.88rem;
-    border-radius: 10px; padding: 11px 22px; text-decoration: none !important;
-    box-shadow: 0 4px 16px rgba(59,130,246,0.35);
-    transition: filter 0.15s ease, box-shadow 0.15s ease;
-    white-space: nowrap;
-}
-.dl-link-btn:hover {
-    filter: brightness(1.12);
-    box-shadow: 0 6px 22px rgba(59,130,246,0.55);
-    color: #ffffff !important; text-decoration: none !important;
-}
-</style>
-""", unsafe_allow_html=True)
+ui.inject_theme()
 
 # ──────────────────────────────────────────────
 # DATA CLASSES
@@ -715,8 +442,7 @@ if not st.session_state.welcomed:
         if st.button("✦  Let's Get Started", type="primary", use_container_width=True):
             st.session_state.welcomed = True
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-
+    
     st.markdown("""
 <div class="wfeats">
   <div class="wfeat"><div class="wfeat-icon">🖥️</div><div class="wfeat-lbl">Multi-Format Export</div><div class="wfeat-desc">All screen sizes in one click</div></div>
@@ -734,18 +460,28 @@ if not st.session_state.welcomed:
 # ──────────────────────────────────────────────
 
 with st.sidebar:
-    st.image("https://cdn.prod.website-files.com/637c4a14cf822a674336049c/699f40327d75665a5a6c8852_9aa2876621654cf23c5bf38ab087b8f0_primedia-malls.png", use_container_width=True)
-    st.markdown("---")
+    _sidebar_logo = BASE_DIR / "img" / "logo_white.png"
+    if _sidebar_logo.exists():
+        st.image(str(_sidebar_logo), use_container_width=True)
 
-    st.subheader("⚙️ System")
-    if ffmpeg_available():
-        st.success(f"FFmpeg detected (`{_FFMPEG_BIN}`)")
-    else:
-        st.error(f"FFmpeg not found (tried: `{_FFMPEG_BIN}`)")
+    # Smart Crop's capability depends on what is actually installed. The UI used
+    # to promise "YOLOv8 + EasyOCR" unconditionally; neither is in
+    # requirements.txt, so it silently ran OpenCV saliency instead. Report the
+    # tier that will really be used.
+    @st.cache_data(ttl=300)
+    def _detection_tier() -> str:
+        try:
+            import ultralytics  # noqa: F401
+            return "object detection (YOLOv8)"
+        except Exception:
+            return "edge & saliency detection (OpenCV)"
 
-    st.markdown("---")
-    st.subheader("🎛️ Export Settings")
-
+    use_smart_crop = st.toggle(
+        "Smart crop",
+        value=True,
+        help=f"Finds the busiest part of the frame using {_detection_tier()} and "
+             "shifts the crop so it stays in shot. Applies to Crop to Fit only.",
+    )
     resize_mode = st.radio(
         "Resize mode",
         options=["Crop to Fit", "Stretch to Fit"],
@@ -758,23 +494,29 @@ with st.sidebar:
     )
     resize_mode_key = "crop" if resize_mode == "Crop to Fit" else "stretch"
 
-    use_smart_crop = st.toggle(
-        "🧠 Smart Crop (AI)",
-        value=True,
-        help="Uses YOLOv8 + EasyOCR to detect faces, text, logos and packshots, "
-             "then adjusts the crop origin so they stay in frame.",
-    )
-    crf    = st.slider("CRF (quality — lower = better)", 12, 28, 18, help="18 is visually lossless for H.264")
-    preset = st.selectbox("Encoding preset", ["ultrafast","fast","medium","slow","veryslow"], index=3)
-    img_duration = st.number_input("Image → Video duration (s)", 3, 60, 10)
+    # Encoder settings are set-once expert controls — progressive disclosure
+    # rather than permanent real estate.
+    with st.expander("Encoding options"):
+        crf    = st.slider("Quality (CRF — lower is better)", 12, 28, 18,
+                           help="18 is visually lossless for H.264.")
+        preset = st.selectbox("Encoding preset",
+                              ["ultrafast", "fast", "medium", "slow", "veryslow"], index=3,
+                              help="Slower presets give smaller files at the same quality.")
+        img_duration = st.number_input("Still image duration (seconds)", 3, 60, 10,
+                                       help="How long a JPG/PNG runs for once converted to video.")
 
-    st.markdown("---")
-    st.subheader("📋 Log")
-    if st.button("View app.log"):
-        try:
-            st.text_area("", _log_path.read_text()[-3000:], height=200)
-        except FileNotFoundError:
-            st.info("No log file yet.")
+    with st.expander("Diagnostics"):
+        if ffmpeg_available():
+            st.caption(f"FFmpeg ready — `{_FFMPEG_BIN}`")
+        else:
+            st.error(f"FFmpeg not found (tried `{_FFMPEG_BIN}`). Exports will fail.")
+        st.caption(f"Smart crop tier: {_detection_tier()}")
+        if st.button("Show recent log", use_container_width=True):
+            try:
+                st.text_area("Recent log output", _log_path.read_text()[-3000:],
+                             height=200, label_visibility="collapsed")
+            except FileNotFoundError:
+                st.caption("No log file yet.")
 
 
 # ──────────────────────────────────────────────
@@ -785,57 +527,14 @@ with st.sidebar:
 # UI  ─  MAIN
 # ──────────────────────────────────────────────
 
-st.title("🎬 AdScreen Converter")
-st.caption("Automated multi-format video export for digital-out-of-home advertising")
+ui.page_header("AdScreen Converter",
+               "Multi-format video export for digital out-of-home advertising")
 
 # ── Page navigation buttons ────────────────────────────────────────────────────
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "convert"
 
-st.markdown("""
-<style>
-.nav-bar [data-testid="stButton"] > button {
-    height: 48px !important;
-    min-height: 48px !important;
-    border-radius: 10px !important;
-    font-size: 0.95rem !important;
-    font-weight: 600 !important;
-    white-space: nowrap !important;
-    padding: 0 28px !important;
-    width: 100% !important;
-    transition: all 0.15s ease !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="primary"] {
-    background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
-    border: none !important;
-    color: #ffffff !important;
-    box-shadow: 0 4px 14px rgba(59,130,246,0.4) !important;
-    text-align: center !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="secondary"] {
-    background: #1a3350 !important;
-    border: 1px solid #2d5f9e !important;
-    color: #93c5fd !important;
-    text-align: center !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="secondary"]:hover {
-    background: #1e3a5f !important;
-    border-color: #3b82f6 !important;
-    color: #f1f5f9 !important;
-    min-height: 48px !important;
-    max-height: 48px !important;
-}
-.nav-bar [data-testid="stButton"] > button p,
-.nav-bar [data-testid="stButton"] > button span {
-    text-align: center !important;
-    color: inherit !important;
-    white-space: nowrap !important;
-    font-size: 0.95rem !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
-st.markdown('<div class="nav-bar">', unsafe_allow_html=True)
 nav_col1, nav_col2, nav_spacer = st.columns([2, 2, 5])
 with nav_col1:
     if st.button(
@@ -855,7 +554,6 @@ with nav_col2:
     ):
         st.session_state.active_tab = "compress"
         st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -1089,23 +787,6 @@ if st.session_state.active_tab == "compress":
 # TAB 1 — CONVERT
 # ══════════════════════════════════════════════
 
-def _step_header(num: int, label: str, done: bool = False):
-    badge = (
-        "<span style='background:#16a34a;color:#fff;border-radius:50%;display:inline-flex;"
-        "align-items:center;justify-content:center;width:28px;height:28px;font-size:0.85rem;"
-        "font-weight:700;margin-right:10px;flex-shrink:0;'>✓</span>"
-        if done else
-        f"<span style='background:#3b82f6;color:#fff;border-radius:50%;display:inline-flex;"
-        f"align-items:center;justify-content:center;width:28px;height:28px;font-size:0.85rem;"
-        f"font-weight:700;margin-right:10px;flex-shrink:0;'>{num}</span>"
-    )
-    st.markdown(
-        f"<div style='display:flex;align-items:center;margin:22px 0 8px;'>"
-        f"{badge}<span style='font-size:1.1rem;font-weight:700;color:#f1f5f9;'>{label}</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
 if st.session_state.active_tab == "convert":
     templates = load_templates()
 
@@ -1141,109 +822,125 @@ if st.session_state.active_tab == "convert":
     # ════════════════════════════════════
     # STEP 1 — Select Templates
     # ════════════════════════════════════
-    _step_header(1, "Select Screen Template(s)", done=step1_done)
+    ui.step_header(1, "Select screen templates", done=step1_done)
 
-    # CSS — card-style template buttons (height scoped to pre-line cards only, not nav)
-    st.markdown("""
-<style>
-/* Unselected template card */
-[data-testid="stButton"] > button[kind="secondary"] {
-    min-height: 72px !important;
-    text-align: left !important;
-    padding: 10px 14px !important;
-    white-space: pre-line !important;
-    line-height: 1.45 !important;
-    font-size: 0.86rem !important;
-    border-radius: 10px !important;
-    background: #0f1f35 !important;
-    border: 2px solid #2d3748 !important;
-    color: #cbd5e1 !important;
-}
-[data-testid="stButton"] > button[kind="secondary"]:hover {
-    border-color: #3b82f6 !important;
-    background: #1a2f50 !important;
-    color: #f1f5f9 !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] p,
-[data-testid="stButton"] > button[kind="secondary"] span {
-    text-align: left !important;
-    color: inherit !important;
-    white-space: pre-line !important;
-}
-/* Selected template card */
-[data-testid="stButton"] > button[kind="primary"] {
-    min-height: 72px !important;
-    text-align: left !important;
-    padding: 10px 14px !important;
-    white-space: pre-line !important;
-    line-height: 1.45 !important;
-    font-size: 0.86rem !important;
-    border-radius: 10px !important;
-    background: #1e3a5f !important;
-    border: 2px solid #60a5fa !important;
-    box-shadow: 0 0 0 3px rgba(96,165,250,0.2) !important;
-}
-[data-testid="stButton"] > button[kind="primary"] p,
-[data-testid="stButton"] > button[kind="primary"] span {
-    text-align: left !important;
-    color: #f1f5f9 !important;
-    white-space: pre-line !important;
-    font-weight: 600 !important;
-}
-</style>
-""", unsafe_allow_html=True)
+    # Venue grouping is derived from the template name ("Menlyn Sky", "Monte
+    # Casino Piazza"). Tags can't carry this — 40 of the 60 templates are
+    # tagged simply "malls" — so the group label is the longest run of leading
+    # words every template in the group shares.
+    _groups: dict[str, list[str]] = {}
+    for _k in all_keys:
+        _groups.setdefault(templates[_k].name.split()[0], []).append(_k)
 
-    # Search bar — reruns on every keystroke (no Enter required)
-    if "tmpl_search" not in st.session_state:
-        st.session_state.tmpl_search = ""
-    st.text_input(
-        "Search templates",
-        placeholder="🔍  Type to search templates…",
-        label_visibility="collapsed",
-        key="tmpl_search",
-        on_change=lambda: None,  # fires rerun on every character change
+    def _group_label(keys: list[str]) -> str:
+        words = [templates[k].name.split() for k in keys]
+        shared: list[str] = []
+        for i in range(min(len(w) for w in words)):
+            if all(w[i] == words[0][i] for w in words):
+                shared.append(words[0][i])
+            else:
+                break
+        return (" ".join(shared)).rstrip(" -—·") or templates[keys[0]].name
+
+    _labelled = sorted(
+        ((_group_label(ks), ks) for ks in _groups.values()),
+        key=lambda pair: (-len(pair[1]), pair[0]),
     )
-    search_q = st.session_state.tmpl_search
 
-    if not search_q:
-        # Show selected chips even when not searching
-        if not st.session_state.selected_keys:
-            st.caption("Type above to search and select templates.")
+    def _search_text(t) -> str:
+        """Name, description, tags and resolutions — mirrors core.template_search_text."""
+        return " ".join([t.name, t.description, " ".join(t.tags),
+                         " ".join(f"{w}x{h}" for w, h in t.formats)]).lower()
+
+    # ── Filters ────────────────────────────────────
+    f_search, f_venue = st.columns([3, 2])
+    with f_search:
+        st.text_input(
+            "Search templates",
+            placeholder="Search by mall, screen or resolution…",
+            label_visibility="collapsed",
+            key="tmpl_search",
+        )
+    with f_venue:
+        _venue_names = ["All venues"] + [lbl for lbl, _ in _labelled]
+        _venue_pick = st.selectbox(
+            "Filter by venue", _venue_names, label_visibility="collapsed",
+            key="tmpl_venue",
+        )
+
+    search_q = (st.session_state.tmpl_search or "").strip().lower()
+
+    # Apply filters. The catalogue is visible by default — it previously
+    # rendered nothing at all until the user typed, which made all 60
+    # templates undiscoverable.
+    visible = [(lbl, ks) for lbl, ks in _labelled
+               if _venue_pick in ("All venues", lbl)]
+    if search_q:
+        visible = [(lbl, [k for k in ks if search_q in _search_text(templates[k])])
+                   for lbl, ks in visible]
+    visible = [(lbl, ks) for lbl, ks in visible if ks]
+
+    _match_count = sum(len(ks) for _, ks in visible)
+
+    def _render_cards(keys: list[str]) -> None:
+        COLS = 3
+        for i in range(0, len(keys), COLS):
+            for col, key in zip(st.columns(COLS), keys[i:i + COLS]):
+                t = templates[key]
+                selected = key in st.session_state.selected_keys
+                short = t.name if len(t.name) <= 28 else t.name[:26] + "…"
+                fmt_note = f"{len(t.formats)} formats" if len(t.formats) > 1 else t.primary_resolution
+                label = f"{'✓  ' if selected else ''}{short}\n{fmt_note}"
+                with col:
+                    if st.button(label, key=f"tmpl_btn_{key}",
+                                 type="primary" if selected else "secondary",
+                                 use_container_width=True):
+                        if selected:
+                            st.session_state.selected_keys.remove(key)
+                        else:
+                            st.session_state.selected_keys.append(key)
+                        st.rerun()
+
+    if not visible:
+        ui.empty_state(
+            "No templates match",
+            f"Nothing matches “{st.session_state.tmpl_search}”. "
+            "Try a mall name (Menlyn, Cresta), a screen (Food Court) or a "
+            "resolution (1920x1080).",
+        )
     else:
-        filtered_keys = [k for k in all_keys if search_q.lower() in k.lower()]
-        if not filtered_keys:
-            st.caption("No templates match your search.")
-        else:
-            st.caption(f"{len(filtered_keys)} result(s) — click a card to select / deselect")
-            COLS = 3
-            rows = [filtered_keys[i:i+COLS] for i in range(0, len(filtered_keys), COLS)]
-            for row in rows:
-                cols = st.columns(COLS)
-                for col, key in zip(cols, row):
-                    t = templates[key]
-                    selected = key in st.session_state.selected_keys
-                    short_name = t.name if len(t.name) <= 26 else t.name[:24] + "…"
-                    label = f"{'✓  ' if selected else ''}{short_name}\n{t.primary_resolution}  ·  {len(t.formats)} format(s)"
-                    css_class = "tmpl-card-btn-sel" if selected else "tmpl-card-btn"
-                    with col:
-                        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-                        if st.button(label, key=f"tmpl_btn_{key}", use_container_width=True):
-                            if selected:
-                                st.session_state.selected_keys.remove(key)
-                            else:
-                                st.session_state.selected_keys.append(key)
-                            st.rerun()
-                        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption(f"{_match_count} of {len(all_keys)} templates · click to select")
+        with st.container(key="tmpl-grid"):
+            if search_q or _venue_pick != "All venues":
+                _render_cards([k for _, ks in visible for k in ks])
+            else:
+                for lbl, ks in visible:
+                    st.markdown(
+                        f'<div style="color:var(--c-text-muted);font-size:.78rem;'
+                        f'font-weight:600;letter-spacing:.06em;text-transform:uppercase;'
+                        f'margin:18px 0 6px">{lbl} · {len(ks)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    _render_cards(ks)
 
+    # ── Selection summary ──────────────────────────
     if st.session_state.selected_keys:
         st.markdown("---")
         c1, c2 = st.columns([6, 1])
         with c1:
-            st.caption("**Selected:** " + "  ·  ".join(
-                templates[k].name for k in st.session_state.selected_keys
-            ))
+            _total_outputs = sum(len(templates[k].formats)
+                                 for k in st.session_state.selected_keys)
+            st.markdown(
+                ui.badge(f"{len(st.session_state.selected_keys)} selected", "info")
+                + "&nbsp;&nbsp;" + ui.badge(f"{_total_outputs} files will export", "neutral")
+                + '<div style="color:var(--c-text-muted);font-size:.82rem;margin-top:6px">'
+                + " · ".join(templates[k].name for k in st.session_state.selected_keys)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
         with c2:
-            if st.button("✕ Clear all", type="secondary", key="clear_all_tmpl"):
+            if st.button("Clear", type="secondary", key="clear_all_tmpl",
+                         use_container_width=True):
                 st.session_state.selected_keys = []
                 st.rerun()
 
@@ -1416,7 +1113,7 @@ if st.session_state.active_tab == "convert":
         total_formats += len(custom_tmpl.formats)
 
     st.markdown("---")
-    _step_header(2, "Upload Your Master File")
+    ui.step_header(2, "Upload your master file")
 
     uploaded = st.file_uploader(
         "Upload master file",
@@ -1429,29 +1126,49 @@ if st.session_state.active_tab == "convert":
         st.info("Upload an MP4, MOV, JPG or PNG file to continue.")
         st.stop()
 
-    for _old in INPUT_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
+    # Streamlit re-runs this whole script on every widget interaction. Without a
+    # guard, each click re-wrote the upload to disk, re-encoded stills to video,
+    # re-probed metadata and re-ran crop analysis — several seconds of ffmpeg per
+    # click, and the cause of the sluggishness and the download races. Everything
+    # below is therefore keyed on a hash of the file's contents.
+    _payload = uploaded.getvalue()
+    _sig = hashlib.sha256(_payload).hexdigest()[:16] + f"-{img_duration}"
 
-    file_ext = Path(uploaded.name).suffix.lower()
+    file_ext   = Path(uploaded.name).suffix.lower()
     input_path = INPUT_DIR / uploaded.name
-    input_path.write_bytes(uploaded.read())
-    st.success(f"✅ Uploaded **{uploaded.name}**")
 
-    # ── Image → Video conversion ───────────────────
-    if file_ext in (".jpg", ".jpeg", ".png"):
-        st.info(f"Still image detected — will be converted to a {img_duration}s video.")
-        video_path = INPUT_DIR / "converted_video.mp4"
-        with st.spinner("Converting image to video…"):
+    if st.session_state.get("source_sig") != _sig:
+        for _old in INPUT_DIR.iterdir():
             try:
-                image_to_video(input_path, video_path, img_duration)
-                input_path = video_path
-                st.success("Image converted to video ✓")
-            except RuntimeError as exc:
-                st.error(f"Conversion failed: {exc}")
-                st.stop()
+                _old.unlink()
+            except Exception:
+                pass
+        input_path.write_bytes(_payload)
+
+        # ── Image → Video conversion ───────────────
+        if file_ext in (".jpg", ".jpeg", ".png"):
+            video_path = INPUT_DIR / "converted_video.mp4"
+            with st.spinner(f"Converting still image to a {img_duration}s video…"):
+                try:
+                    image_to_video(input_path, video_path, img_duration)
+                    input_path = video_path
+                except RuntimeError as exc:
+                    st.error(f"Conversion failed: {exc}")
+                    st.stop()
+
+        st.session_state.source_sig  = _sig
+        st.session_state.source_path = str(input_path)
+        st.session_state.pop("importance_boxes", None)
+    else:
+        input_path = Path(st.session_state.source_path)
+        if not input_path.exists():
+            # Session scratch was swept — force a clean re-ingest next run
+            st.session_state.pop("source_sig", None)
+            st.rerun()
+
+    st.success(f"Uploaded **{uploaded.name}**")
+    if file_ext in (".jpg", ".jpeg", ".png"):
+        st.caption(f"Still image — converted to a {img_duration}s video for export.")
 
     # ── Probe & preview ────────────────────────────
     try:
@@ -1461,21 +1178,26 @@ if st.session_state.active_tab == "convert":
         st.stop()
 
     thumb_path = PREVIEW_DIR / "thumb.jpg"
-    generate_thumbnail(input_path, thumb_path)
+    if not thumb_path.exists():
+        generate_thumbnail(input_path, thumb_path)
 
     # ── Smart crop detection ────────────────────────
     importance_boxes: list[tuple[int, int, int, int]] = []
     if use_smart_crop:
-        with st.spinner("🧠 Analysing content (faces, text, logos)…"):
-            try:
-                from smart_crop import extract_keyframes, detect_importance_regions, draw_detections
-                frames = extract_keyframes(input_path)
-                importance_boxes = detect_importance_regions(frames)
-                if importance_boxes and thumb_path.exists():
-                    overlay_path = PREVIEW_DIR / "thumb_overlay.jpg"
-                    draw_detections(thumb_path, importance_boxes, overlay_path)
-            except Exception as exc:
-                st.warning(f"Smart crop analysis unavailable: {exc}")
+        if "importance_boxes" in st.session_state:
+            importance_boxes = st.session_state.importance_boxes
+        else:
+            with st.spinner("Analysing content to keep key elements in frame…"):
+                try:
+                    from smart_crop import extract_keyframes, detect_importance_regions, draw_detections
+                    frames = extract_keyframes(input_path)
+                    importance_boxes = detect_importance_regions(frames)
+                    if importance_boxes and thumb_path.exists():
+                        overlay_path = PREVIEW_DIR / "thumb_overlay.jpg"
+                        draw_detections(thumb_path, importance_boxes, overlay_path)
+                    st.session_state.importance_boxes = importance_boxes
+                except Exception as exc:
+                    st.warning(f"Smart crop analysis unavailable: {exc}")
 
     col_a, col_b = st.columns([1, 2])
     with col_a:
@@ -1517,7 +1239,7 @@ if st.session_state.active_tab == "convert":
     # STEP 3 — Export
     # ════════════════════════════════════
     st.markdown("---")
-    _step_header(3, "Export All Formats")
+    ui.step_header(3, "Export all formats")
     st.caption(
         f"{len(all_export_jobs)} output(s) will be generated across "
         f"{len(effective_templates)} template(s)."
