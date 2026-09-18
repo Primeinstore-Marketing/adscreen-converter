@@ -226,12 +226,19 @@ def export_format(
     crf: int = 18,
     preset: str = "slow",
     resize_mode: str = "crop",
+    max_duration: "int | None" = None,
 ) -> subprocess.CompletedProcess:
     """Export a video to the target resolution.
 
     resize_mode:
       "crop"    — scale up then centre-crop (no distortion, may cut edges)
       "stretch" — scale directly to exact dimensions (may squash/stretch)
+
+    max_duration:
+      Hard cap in seconds. DOOH playout slots are fixed, so anything longer is
+      trimmed to fit. Sources already under the cap are left untouched — padding
+      them would alter the creative. Previously no cap existed at all and
+      uploaded videos exported at their original length.
     """
     if resize_mode == "stretch":
         vf = f"scale={width}:{height}"
@@ -240,9 +247,10 @@ def export_format(
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:{crop_x}:{crop_y}"
         )
-    cmd = [
-        _FFMPEG_BIN, "-y",
-        "-i", str(src),
+    cmd = [_FFMPEG_BIN, "-y", "-i", str(src)]
+    if max_duration:
+        cmd += ["-t", str(max_duration)]
+    cmd += [
         "-vf", vf,
         "-c:v", "libx264",
         "-crf", str(crf),
@@ -446,6 +454,20 @@ with st.sidebar:
     )
     resize_mode_key = "crop" if resize_mode == "Crop to Fit" else "stretch"
 
+    # DOOH playout slots are fixed lengths, so this is a business rule rather
+    # than a preference: every export is capped here. It used to be a free
+    # 3-60s field that only applied to still images — uploaded videos were
+    # never capped at all and exported at their original length.
+    slot_duration = st.radio(
+        "Output duration",
+        options=[10, 15],
+        format_func=lambda s_: f"{s_} seconds",
+        index=0,
+        horizontal=True,
+        help="Stills are rendered to exactly this length. Videos longer than "
+             "this are trimmed to fit; shorter videos are left as they are.",
+    )
+
     # Encoder settings are set-once expert controls — progressive disclosure
     # rather than permanent real estate.
     with st.expander("Encoding options"):
@@ -454,8 +476,6 @@ with st.sidebar:
         preset = st.selectbox("Encoding preset",
                               ["ultrafast", "fast", "medium", "slow", "veryslow"], index=3,
                               help="Slower presets give smaller files at the same quality.")
-        img_duration = st.number_input("Still image duration (seconds)", 3, 60, 10,
-                                       help="How long a JPG/PNG runs for once converted to video.")
 
     with st.expander("Diagnostics"):
         if ffmpeg_available():
@@ -1084,7 +1104,7 @@ if st.session_state.active_tab == "convert":
     # click, and the cause of the sluggishness and the download races. Everything
     # below is therefore keyed on a hash of the file's contents.
     _payload = uploaded.getvalue()
-    _sig = hashlib.sha256(_payload).hexdigest()[:16] + f"-{img_duration}"
+    _sig = hashlib.sha256(_payload).hexdigest()[:16] + f"-{slot_duration}"
 
     file_ext   = Path(uploaded.name).suffix.lower()
     input_path = INPUT_DIR / uploaded.name
@@ -1100,9 +1120,9 @@ if st.session_state.active_tab == "convert":
         # ── Image → Video conversion ───────────────
         if file_ext in (".jpg", ".jpeg", ".png"):
             video_path = INPUT_DIR / "converted_video.mp4"
-            with st.spinner(f"Converting still image to a {img_duration}s video…"):
+            with st.spinner(f"Converting still image to a {slot_duration}s video…"):
                 try:
-                    image_to_video(input_path, video_path, img_duration)
+                    image_to_video(input_path, video_path, slot_duration)
                     input_path = video_path
                 except RuntimeError as exc:
                     st.error(f"Conversion failed: {exc}")
@@ -1120,7 +1140,7 @@ if st.session_state.active_tab == "convert":
 
     st.success(f"Uploaded **{uploaded.name}**")
     if file_ext in (".jpg", ".jpeg", ".png"):
-        st.caption(f"Still image — converted to a {img_duration}s video for export.")
+        st.caption(f"Still image — converted to a {slot_duration}s video for export.")
 
     # ── Probe & preview ────────────────────────────
     try:
@@ -1165,9 +1185,28 @@ if st.session_state.active_tab == "convert":
         st.markdown("**Source file**")
         st.markdown(f"- Resolution: **{video_w}×{video_h}**")
         if duration:
-            st.markdown(f"- Duration: **{duration:.1f}s**")
+            _out_secs = min(duration, slot_duration)
+            st.markdown(
+                f"- Duration: **{duration:.1f}s** → exports at **{_out_secs:.1f}s**"
+            )
         st.markdown(f"- Templates selected: **{len(selected_templates)}**")
         st.markdown(f"- Total outputs: **{total_formats}**")
+
+        # Say plainly what the duration cap will do to this specific file,
+        # before the user spends time on an export.
+        if duration:
+            if duration > slot_duration + 0.05:
+                st.warning(
+                    f"This clip is {duration:.1f}s and will be **trimmed to the "
+                    f"first {slot_duration}s**. Change the output duration in the "
+                    "sidebar if that is wrong."
+                )
+            elif duration < slot_duration - 0.05:
+                st.info(
+                    f"This clip is {duration:.1f}s — shorter than the "
+                    f"{slot_duration}s slot. It exports at its own length; "
+                    "it is not padded or looped."
+                )
         if use_smart_crop:
             if importance_boxes:
                 st.success(f"🧠 Smart crop active — {len(importance_boxes)} important region(s) detected")
@@ -1242,6 +1281,7 @@ if st.session_state.active_tab == "convert":
                     crf=crf,
                     preset=preset,
                     resize_mode=resize_mode_key,
+                    max_duration=slot_duration,
                 )
                 output_files.append(out)
                 log.info("Exported %s", out.name)
