@@ -818,96 +818,64 @@ if st.session_state.active_tab == "convert":
         ((_group_label(ks), ks) for ks in _groups.values()),
         key=lambda pair: (-len(pair[1]), pair[0]),
     )
+    _venue_of = {k: lbl for lbl, ks in _labelled for k in ks}
 
-    def _search_text(t) -> str:
-        """Name, description, tags and resolutions — mirrors core.template_search_text."""
-        return " ".join([t.name, t.description, " ".join(t.tags),
-                         " ".join(f"{w}x{h}" for w, h in t.formats)]).lower()
+    def _option_label(key: str) -> str:
+        t = templates[key]
+        detail = (f"{len(t.formats)} formats" if len(t.formats) > 1
+                  else t.primary_resolution)
+        return f"{t.name}  ·  {detail}"
 
-    # ── Filters ────────────────────────────────────
-    f_search, f_venue = st.columns([3, 2])
-    with f_search:
-        st.text_input(
-            "Search templates",
-            placeholder="Search by mall, screen or resolution…",
-            label_visibility="collapsed",
-            key="tmpl_search",
-        )
-    with f_venue:
-        _venue_names = ["All venues"] + [lbl for lbl, _ in _labelled]
+    # ── Venue, then screens ────────────────────────
+    # A grid of 60 cards meant scrolling past every mall to reach one screen.
+    # Narrowing by venue first keeps the list short, and the multiselect itself
+    # accepts typing, so searching by mall, screen or resolution still works
+    # without a separate search field.
+    c_venue, c_all = st.columns([3, 1])
+    with c_venue:
         _venue_pick = st.selectbox(
-            "Filter by venue", _venue_names, label_visibility="collapsed",
+            "Venue",
+            ["All venues"] + [f"{lbl}  ({len(ks)})" for lbl, ks in _labelled],
             key="tmpl_venue",
+            help="Narrow the list to one mall, or leave on All venues to search everything.",
         )
+    _venue_name = _venue_pick.split("  (")[0]
+    _option_keys = ([k for lbl, ks in _labelled if lbl == _venue_name for k in ks]
+                    if _venue_pick != "All venues" else all_keys)
 
-    search_q = (st.session_state.tmpl_search or "").strip().lower()
+    with c_all:
+        st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+        if _venue_pick != "All venues":
+            if st.button(f"Add all {len(_option_keys)}", use_container_width=True,
+                         key="add_all_venue"):
+                for k in _option_keys:
+                    if k not in st.session_state.selected_keys:
+                        st.session_state.selected_keys.append(k)
+                st.rerun()
 
-    # Apply filters. The catalogue is visible by default — it previously
-    # rendered nothing at all until the user typed, which made all 60
-    # templates undiscoverable.
-    visible = [(lbl, ks) for lbl, ks in _labelled
-               if _venue_pick in ("All venues", lbl)]
-    if search_q:
-        visible = [(lbl, [k for k in ks if search_q in _search_text(templates[k])])
-                   for lbl, ks in visible]
-    visible = [(lbl, ks) for lbl, ks in visible if ks]
-
-    _match_count = sum(len(ks) for _, ks in visible)
-
-    def _render_cards(keys: list[str]) -> None:
-        COLS = 3
-        for i in range(0, len(keys), COLS):
-            for col, key in zip(st.columns(COLS), keys[i:i + COLS]):
-                t = templates[key]
-                selected = key in st.session_state.selected_keys
-                short = t.name if len(t.name) <= 28 else t.name[:26] + "…"
-                fmt_note = f"{len(t.formats)} formats" if len(t.formats) > 1 else t.primary_resolution
-                label = f"{'✓  ' if selected else ''}{short}\n{fmt_note}"
-                with col:
-                    if st.button(label, key=f"tmpl_btn_{key}",
-                                 type="primary" if selected else "secondary",
-                                 use_container_width=True):
-                        if selected:
-                            st.session_state.selected_keys.remove(key)
-                        else:
-                            st.session_state.selected_keys.append(key)
-                        st.rerun()
-
-    if not visible:
-        ui.empty_state(
-            "No templates match",
-            f"Nothing matches “{st.session_state.tmpl_search}”. "
-            "Try a mall name (Menlyn, Cresta), a screen (Food Court) or a "
-            "resolution (1920x1080).",
-        )
-    else:
-        st.caption(f"{_match_count} of {len(all_keys)} templates · click to select")
-        with st.container(key="tmpl-grid"):
-            if search_q or _venue_pick != "All venues":
-                _render_cards([k for _, ks in visible for k in ks])
-            else:
-                for lbl, ks in visible:
-                    st.markdown(
-                        f'<div style="color:var(--c-text-muted);font-size:.78rem;'
-                        f'font-weight:600;letter-spacing:.06em;text-transform:uppercase;'
-                        f'margin:18px 0 6px">{lbl} · {len(ks)}</div>',
-                        unsafe_allow_html=True,
-                    )
-                    _render_cards(ks)
+    # Selections made under a different venue filter must survive the switch,
+    # so they are held aside and merged back after the widget reports.
+    _held = [k for k in st.session_state.selected_keys if k not in _option_keys]
+    _picked = st.multiselect(
+        "Screens",
+        options=_option_keys,
+        default=[k for k in st.session_state.selected_keys if k in _option_keys],
+        format_func=_option_label,
+        placeholder="Type a mall, screen or resolution…",
+        label_visibility="collapsed",
+    )
+    st.session_state.selected_keys = _held + _picked
 
     # ── Selection summary ──────────────────────────
     if st.session_state.selected_keys:
-        st.markdown("---")
+        _total_outputs = sum(len(templates[k].formats)
+                             for k in st.session_state.selected_keys)
         c1, c2 = st.columns([6, 1])
         with c1:
-            _total_outputs = sum(len(templates[k].formats)
-                                 for k in st.session_state.selected_keys)
             st.markdown(
-                ui.badge(f"{len(st.session_state.selected_keys)} selected", "info")
-                + "&nbsp;&nbsp;" + ui.badge(f"{_total_outputs} files will export", "neutral")
-                + '<div style="color:var(--c-text-muted);font-size:.82rem;margin-top:6px">'
-                + " · ".join(templates[k].name for k in st.session_state.selected_keys)
-                + "</div>",
+                ui.badge(f"{len(st.session_state.selected_keys)} screens", "info")
+                + "&nbsp;&nbsp;"
+                + ui.badge(f"{_total_outputs} files will export", "neutral"),
                 unsafe_allow_html=True,
             )
         with c2:
@@ -915,6 +883,9 @@ if st.session_state.active_tab == "convert":
                          use_container_width=True):
                 st.session_state.selected_keys = []
                 st.rerun()
+    else:
+        st.caption(f"{len(all_keys)} templates across {len(_labelled)} venues. "
+                   "Pick a venue, or type to search all of them.")
 
     # ── Optional: Custom screen size ───────────────
     _RATIOS = {

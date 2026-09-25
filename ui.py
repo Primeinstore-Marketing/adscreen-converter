@@ -177,23 +177,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {{
 }}
 [data-testid="stTextInput"] input::placeholder {{ color: var(--c-text-muted); }}
 
-/* ── Template picker cards (scoped — no global button leak) ───────────── */
-.st-key-tmpl-grid [data-testid="stButton"] > button {{
-    min-height: 74px;
-    text-align: left;
-    padding: 10px 14px;
-    white-space: pre-line;
-    line-height: 1.45;
-    font-size: .84rem;
-    font-weight: 500;
-    border-radius: var(--r-card);
-    align-items: flex-start;
-}}
-.st-key-tmpl-grid [data-testid="stButton"] > button p {{
-    text-align: left;
-    white-space: pre-line;
-}}
-
 /* ── Surfaces ──────────────────────────────────────────────────────────── */
 .ds-panel {{
     background: var(--c-surface);
