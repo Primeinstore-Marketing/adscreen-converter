@@ -28,6 +28,40 @@ def _resolve_ffmpeg() -> str:
 
 _FFMPEG_BIN = _resolve_ffmpeg()
 
+
+# ── Keep folder paths on folder uploads ───────────────────────────────────────
+# For a folder upload the browser reports each file as "Campaign/Menlyn/ad.jpg"
+# in the widget state, but Streamlit's server stores only the multipart file
+# name ("ad.jpg") and UploadedFile.name comes from that — so the folder and its
+# subfolders were lost before the app ever saw them. Restore the reported path.
+# Wrapped defensively: if Streamlit's internals change, uploads still work and
+# simply arrive without their folder path.
+def _keep_upload_paths() -> None:
+    try:
+        import streamlit.elements.widgets.file_uploader as _fu
+        from streamlit.runtime.uploaded_file_manager import UploadedFile as _UF
+    except Exception:
+        return
+    _orig = getattr(_fu, "_get_upload_files", None)
+    if _orig is None or getattr(_orig, "_keeps_paths", False):
+        return
+
+    def _get_upload_files(widget_value):
+        files = _orig(widget_value)
+        try:
+            names = {i.file_id: i.name for i in widget_value.uploaded_file_info}
+            for f in files:
+                if isinstance(f, _UF) and "/" in names.get(f.file_id, ""):
+                    f.name = names[f.file_id]
+        except Exception:
+            pass
+        return files
+
+    _get_upload_files._keeps_paths = True
+    _fu._get_upload_files = _get_upload_files
+
+_keep_upload_paths()
+
 # ──────────────────────────────────────────────
 # CONFIG & LOGGING
 # ──────────────────────────────────────────────
@@ -227,12 +261,19 @@ def export_format(
     preset: str = "slow",
     resize_mode: str = "crop",
     max_duration: "int | None" = None,
+    scaled_w: int = 0,
+    scaled_h: int = 0,
 ) -> subprocess.CompletedProcess:
     """Export a video to the target resolution.
 
     resize_mode:
-      "crop"    — scale up then centre-crop (no distortion, may cut edges)
+      "crop"    — scale up then crop (no distortion, may cut edges)
       "stretch" — scale directly to exact dimensions (may squash/stretch)
+
+    crop_x / crop_y are in the coordinate space of the scaled frame
+    (scaled_w × scaled_h). The scale is given explicitly rather than left to
+    force_original_aspect_ratio, whose rounding differed from the planner's —
+    the crop origin then pointed at a frame of a different size.
 
     max_duration:
       Hard cap in seconds. DOOH playout slots are fixed, so anything longer is
@@ -240,12 +281,12 @@ def export_format(
       them would alter the creative. Previously no cap existed at all and
       uploaded videos exported at their original length.
     """
-    if resize_mode == "stretch":
-        vf = f"scale={width}:{height}"
+    if resize_mode == "stretch" or not (scaled_w and scaled_h):
+        vf = f"scale={width}:{height}:flags=lanczos,setsar=1"
     else:
         vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height}:{crop_x}:{crop_y}"
+            f"scale={scaled_w}:{scaled_h}:flags=lanczos,"
+            f"crop={width}:{height}:{crop_x}:{crop_y},setsar=1"
         )
     cmd = [_FFMPEG_BIN, "-y", "-i", str(src)]
     if max_duration:
@@ -255,6 +296,9 @@ def export_format(
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", preset,
+        # Without this, 4:2:2 / 4:4:4 masters (ProRes, PNG) produced High 4:2:2
+        # profile files that many screen players refuse to decode.
+        "-pix_fmt", "yuv420p",
         "-an",
         "-movflags", "+faststart",
         str(dst),
@@ -300,6 +344,8 @@ class FormatPlan:
     crop_x: int = 0
     crop_y: int = 0
     label: str = ""
+    scaled_w: int = 0
+    scaled_h: int = 0
 
 
 def plan_exports(
@@ -308,32 +354,63 @@ def plan_exports(
     video_h: int,
     importance_boxes: list = None,
 ) -> list[FormatPlan]:
-    """Centre-crop plan, or smart-crop when importance_boxes are provided."""
+    """Centre-crop plan, or smart-crop when importance_boxes are provided.
+
+    Crop origins are in the scaled frame. The centre crop used to be computed
+    from the *source* size, so any target larger than or shaped differently
+    from the source came out off-centre (a 1920×1080 master cropped to
+    1080×1920 was cut 420px from the left instead of 1166px).
+    """
+    from smart_crop import smart_crop_origin, _scaled_dims
     plans = []
     for fmt in template.formats:
         target_w, target_h = fmt[0], fmt[1]
         label = fmt[2] if len(fmt) > 2 else ""
+        scaled_w, scaled_h = _scaled_dims(video_w, video_h, target_w, target_h)
         if importance_boxes:
-            from smart_crop import smart_crop_origin
             crop_x, crop_y = smart_crop_origin(
                 video_w, video_h, target_w, target_h, importance_boxes
             )
         else:
-            crop_x = max(0, (video_w - target_w) // 2)
-            crop_y = max(0, (video_h - target_h) // 2)
-        plans.append(FormatPlan(width=target_w, height=target_h, crop_x=crop_x, crop_y=crop_y, label=label))
+            crop_x = (scaled_w - target_w) // 2
+            crop_y = (scaled_h - target_h) // 2
+        plans.append(FormatPlan(width=target_w, height=target_h, crop_x=crop_x,
+                                crop_y=crop_y, label=label,
+                                scaled_w=scaled_w, scaled_h=scaled_h))
     return plans
+
+
+def _keep_name(text: str) -> str:
+    """The user's own file name, kept as typed (spaces, case, punctuation) —
+    only characters that are invalid in file names on Windows or macOS go."""
+    import re
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text).strip(" .") or "export"
+
+
+def _safe_name(text: str) -> str:
+    """Filesystem-safe file stem: no path separators or shell-hostile characters."""
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._") or "export"
 
 
 # ──────────────────────────────────────────────
 # ZIP HELPER
 # ──────────────────────────────────────────────
 
-def zip_outputs(files: list[Path], output_dir: Path) -> Path:
-    zip_path = output_dir / f"export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+def zip_outputs(files: list[Path], output_dir: Path, root: Optional[Path] = None,
+                name: str = "export") -> Path:
+    """Bundle files into a ZIP. With `root`, entries keep their folder path
+    relative to it; otherwise they are stored flat by file name.
+
+    Entries are stored, not deflated: MP4/JPEG/PNG are already compressed, so
+    deflate only burned CPU time for a ~1% gain."""
+    # Named after the user's own files, without a timestamp suffix. Each
+    # export/compress run writes into a freshly cleared directory, so this
+    # cannot collide with a previous run's ZIP.
+    zip_path = output_dir / f"{name}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for f in files:
-            zf.write(f, f.name)
+            zf.write(f, str(f.relative_to(root)) if root else f.name)
     return zip_path
 
 
@@ -454,19 +531,25 @@ with st.sidebar:
     )
     resize_mode_key = "crop" if resize_mode == "Crop to Fit" else "stretch"
 
-    # DOOH playout slots are fixed lengths, so this is a business rule rather
-    # than a preference: every export is capped here. It used to be a free
-    # 3-60s field that only applied to still images — uploaded videos were
-    # never capped at all and exported at their original length.
-    slot_duration = st.radio(
+    # DOOH playout slots are fixed lengths, so every export is capped here.
+    # 10s and 15s are the standard slots; Custom covers non-standard bookings.
+    _slot_choice = st.radio(
         "Output duration",
-        options=[10, 15],
-        format_func=lambda s_: f"{s_} seconds",
+        options=[10, 15, "custom"],
+        format_func=lambda s_: "Custom" if s_ == "custom" else f"{s_} seconds",
         index=0,
         horizontal=True,
         help="Stills are rendered to exactly this length. Videos longer than "
              "this are trimmed to fit; shorter videos are left as they are.",
     )
+    if _slot_choice == "custom":
+        slot_duration = int(st.number_input(
+            "Custom duration (seconds)",
+            min_value=1, max_value=300, value=20, step=1,
+            key="custom_slot_duration",
+        ))
+    else:
+        slot_duration = _slot_choice
 
     # Encoder settings are set-once expert controls — progressive disclosure
     # rather than permanent real estate.
@@ -533,9 +616,121 @@ st.markdown("---")
 # PAGE 2 — COMPRESS
 # ══════════════════════════════════════════════
 
+_IMG_EXT   = {".jpg", ".jpeg", ".png", ".webp"}
+_VID_EXT   = {".mp4", ".mov", ".m4v"}
+_GIF_EXT   = {".gif"}
+_MEDIA_EXT = _IMG_EXT | _VID_EXT | _GIF_EXT
+
+# level: (video CRF, JPEG/WebP quality, GIF colours, GIF fps)
+# Resolution is never changed. The old CRF ladder (22/28/34/40) went well past
+# the point of visible blocking; this one tops out where H.264 still holds up
+# on a large screen.
+COMPRESS_LEVELS = {
+    "Light":   (20, 92, 256, 25),
+    "Medium":  (23, 86, 192, 20),
+    "High":    (26, 80, 128, 15),
+    "Maximum": (30, 72, 64, 12),
+}
+
+COMPRESS_ROOT = _BASE_IO_DIR / "sessions" / _sess / "compress"
+
+import os as _os
+_COMPRESS_WORKERS = max(1, min(4, (_os.cpu_count() or 2) // 2))
+_FFMPEG_THREADS   = max(1, (_os.cpu_count() or 2) // _COMPRESS_WORKERS)
+
+
+def _clean_relpath(name: str) -> Optional[Path]:
+    """Turn an uploaded name ("Campaign/Rosebank/ad.jpg") into a safe relative
+    path, dropping anything that could climb out of the work directory."""
+    from pathlib import PurePosixPath
+    parts = [p for p in PurePosixPath(name.replace("\\", "/")).parts
+             if p not in ("", ".", "..", "/")]
+    # __MACOSX/ and ._name are Finder metadata inside ZIPs, not media.
+    if not parts or parts[0] == "__MACOSX" or parts[-1].startswith("."):
+        return None
+    return Path(*parts)
+
+
+def _batch_name(rel_paths: list[str]) -> str:
+    """ZIP name for a compress batch, taken from the user's own names:
+    the uploaded folder if everything came from one; otherwise the part the
+    file names share ("Summer Sale 1080x1920", "Summer Sale 600x720" →
+    "Summer Sale"); otherwise the first file's name."""
+    import os.path
+    paths = [Path(p) for p in rel_paths]
+    tops = {p.parts[0] for p in paths if len(p.parts) > 1}
+    if len(tops) == 1 and all(len(p.parts) > 1 for p in paths):
+        return _keep_name(tops.pop())
+    stems = sorted(p.stem for p in paths)
+    shared = os.path.commonprefix(stems).rstrip(" _-.(")
+    if len(paths) > 1 and len(shared) >= 3:
+        return _keep_name(shared)
+    return _keep_name(stems[0])
+
+
+def compress_one(src: Path, dst: Path, level: str) -> tuple[Path, bool]:
+    """Compress one file at its original resolution.
+
+    Returns (written_path, kept_original). If the re-encode comes out no
+    smaller than the source — common for files that were already exported
+    efficiently — the original is copied through instead.
+    """
+    v_crf, img_q, gif_colours, gif_fps = COMPRESS_LEVELS[level]
+    ext = src.suffix.lower()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if ext in _IMG_EXT:
+        from PIL import Image
+        out = dst.with_suffix(ext)
+        with Image.open(src) as im:
+            extra = {k: im.info[k] for k in ("icc_profile", "exif") if im.info.get(k)}
+            if ext in (".jpg", ".jpeg"):
+                if im.mode not in ("RGB", "L", "CMYK"):
+                    im = im.convert("RGB")
+                im.save(out, "JPEG", quality=img_q, optimize=True, progressive=True,
+                        subsampling=0 if level == "Light" else 2, **extra)
+            elif ext == ".webp":
+                im.save(out, "WEBP", quality=img_q, method=6, **extra)
+            else:  # PNG — lossless at Light/Medium, palette at High/Maximum
+                if level in ("High", "Maximum"):
+                    colours = 256 if level == "High" else 128
+                    method = (Image.Quantize.FASTOCTREE if im.mode == "RGBA"
+                              else Image.Quantize.MEDIANCUT)
+                    im = im.convert("RGBA" if "A" in im.mode else "RGB")
+                    im = im.quantize(colors=colours, method=method,
+                                     dither=Image.Dither.FLOYDSTEINBERG)
+                im.save(out, "PNG", optimize=True,
+                        **{k: v for k, v in extra.items() if k == "icc_profile"})
+    elif ext in _GIF_EXT:
+        out = dst.with_suffix(".gif")
+        palette = out.with_name(f"_palette_{out.stem}.png")
+        _run([_FFMPEG_BIN, "-y", "-i", str(src),
+              "-vf", f"fps={gif_fps},palettegen=max_colors={gif_colours}:stats_mode=diff",
+              str(palette)])
+        _run([_FFMPEG_BIN, "-y", "-i", str(src), "-i", str(palette),
+              "-filter_complex", f"fps={gif_fps}[x];[x][1:v]paletteuse=dither=bayer",
+              str(out)])
+        palette.unlink(missing_ok=True)
+    else:
+        out = dst.with_suffix(".mp4")
+        _run([_FFMPEG_BIN, "-y", "-i", str(src),
+              "-c:v", "libx264", "-crf", str(v_crf), "-preset", "medium",
+              "-pix_fmt", "yuv420p", "-threads", str(_FFMPEG_THREADS),
+              "-an", "-movflags", "+faststart",
+              str(out)])
+
+    if out.stat().st_size >= src.stat().st_size:
+        out.unlink(missing_ok=True)
+        out = dst.with_suffix(src.suffix)
+        shutil.copyfile(src, out)
+        return out, True
+    return out, False
+
+
 if st.session_state.active_tab == "compress":
     st.subheader("Reduce File Size")
-    st.caption("Re-encodes your video at a lower bitrate without changing the resolution or cropping.")
+    st.caption("Re-encodes images and videos to smaller files. Resolution is never "
+               "changed and nothing is cropped. Folders keep their structure in the ZIP.")
 
     # Check if output files were passed over from the convert tab
     _queued = st.session_state.get("compress_queued_files", [])
@@ -547,32 +742,46 @@ if st.session_state.active_tab == "compress":
             st.session_state.compress_queued_files = []
             st.rerun()
 
-    comp_uploaded = st.file_uploader(
-        "📤 Upload files to compress (MP4, MOV, GIF, JPG, PNG)",
-        type=["mp4", "mov", "gif", "jpg", "jpeg", "png"],
-        key=f"compress_upload_{st.session_state.compress_key}",
-        accept_multiple_files=True,
+    _src_mode = st.radio(
+        "Upload",
+        ["Files", "Folder"],
+        horizontal=True,
+        key="comp_src_mode",
+        help="**Files** — pick any number of files, or ZIP archives of folders.\n\n"
+             "**Folder** — pick one folder; every image and video inside it "
+             "(including subfolders) is compressed.",
     )
+    if _src_mode == "Folder":
+        comp_uploaded = st.file_uploader(
+            "📁 Choose a folder (JPG, PNG, WEBP, GIF, MP4, MOV)",
+            type=sorted(e.lstrip(".") for e in _MEDIA_EXT),
+            key=f"compress_dir_{st.session_state.compress_key}",
+            accept_multiple_files="directory",
+        )
+    else:
+        comp_uploaded = st.file_uploader(
+            "📤 Upload files to compress (JPG, PNG, WEBP, GIF, MP4, MOV, or ZIP)",
+            type=sorted(e.lstrip(".") for e in _MEDIA_EXT) + ["zip"],
+            key=f"compress_upload_{st.session_state.compress_key}",
+            accept_multiple_files=True,
+        )
+    comp_uploaded = comp_uploaded or []
 
     if comp_uploaded or _queued:
         comp_level = st.select_slider(
             "Compression level",
-            options=["Light", "Medium", "High", "Maximum"],
+            options=list(COMPRESS_LEVELS),
             value="Medium",
             key="comp_level_slider",
-            help="Light = best quality / larger file.  Maximum = smallest file / lower quality.",
+            help="Light = best quality / larger file.  Maximum = smallest file. "
+                 "Resolution stays the same at every level.",
         )
-        crf_map = {"Light": 22, "Medium": 28, "High": 34, "Maximum": 40}
-        comp_crf = crf_map[comp_level]
 
         # Show file list using metadata only — no f.read() here, runs on every render
         total_orig_mb = 0.0
         file_meta = []   # (display_name, size_mb, is_queued, source)
         for f in comp_uploaded:
-            try:
-                mb = (getattr(f, "size", None) or len(f.getvalue())) / 1_000_000
-            except Exception:
-                mb = 0.0
+            mb = (getattr(f, "size", None) or 0) / 1_000_000
             total_orig_mb += mb
             file_meta.append((f.name, mb, False, f))
         for p in _queued:
@@ -581,95 +790,113 @@ if st.session_state.active_tab == "compress":
             total_orig_mb += mb
             file_meta.append((p.name, mb, True, p))
 
-        st.markdown(f"**{len(file_meta)} file(s) queued — total {total_orig_mb:.1f} MB**")
-        for name, mb, _, _ in file_meta:
-            st.caption(f"• {name}  —  {mb:.1f} MB")
+        st.markdown(f"**{len(file_meta)} item(s) — total {total_orig_mb:.1f} MB**")
+        with st.expander("Show files", expanded=len(file_meta) <= 8):
+            for name, mb, _, _ in file_meta:
+                st.caption(f"• {name}  —  {mb:.1f} MB")
 
         if st.button("🗜️ Compress All", type="primary", key="compress_btn"):
             st.session_state.pop("comp_results", None)
 
-            # Save uploaded files to disk one at a time (inside handler — runs once)
-            comp_inputs = []
-            save_err = False
-            for name, mb, is_queued, src in file_meta:
-                if is_queued:
-                    comp_inputs.append((Path(src), mb))
-                else:
-                    try:
-                        comp_input = INPUT_DIR / f"compress_{src.name}"
-                        data = src.getvalue() if hasattr(src, "getvalue") else src.read()
-                        comp_input.write_bytes(data)
-                        actual_mb = comp_input.stat().st_size / 1_000_000
-                        comp_inputs.append((comp_input, actual_mb))
-                    except Exception as exc:
-                        st.error(f"Could not save {name}: {exc}")
-                        save_err = True
+            # Fresh work area per run: earlier runs' files never leak into this ZIP.
+            shutil.rmtree(COMPRESS_ROOT, ignore_errors=True)
+            _run_dir = COMPRESS_ROOT / _uuid.uuid4().hex[:8]
+            _in_dir, _out_dir = _run_dir / "in", _run_dir / "out"
+            _in_dir.mkdir(parents=True)
+            _out_dir.mkdir(parents=True)
 
-            if save_err:
+            # Gather (relative path, source file) for every media file.
+            jobs: list[tuple[Path, Path]] = []
+            _taken: set[Path] = set()
+
+            def _claim(rel: Path) -> Path:
+                cand, n = rel, 1
+                while cand.with_suffix("") in _taken:
+                    n += 1
+                    cand = rel.with_name(f"{rel.stem}_{n}{rel.suffix}")
+                _taken.add(cand.with_suffix(""))
+                return cand
+
+            with st.spinner("Reading files…"):
+                for name, mb, is_queued, src in file_meta:
+                    try:
+                        if is_queued:
+                            jobs.append((_claim(Path(src.name)), Path(src)))
+                            continue
+                        rel = _clean_relpath(src.name)
+                        if rel is None:
+                            continue
+                        if rel.suffix.lower() == ".zip":
+                            import io
+                            with zipfile.ZipFile(io.BytesIO(src.getvalue())) as zf:
+                                for info in zf.infolist():
+                                    member = _clean_relpath(info.filename)
+                                    if (info.is_dir() or member is None
+                                            or member.suffix.lower() not in _MEDIA_EXT):
+                                        continue
+                                    member = _claim(Path(rel.stem) / member)
+                                    dest = _in_dir / member
+                                    dest.parent.mkdir(parents=True, exist_ok=True)
+                                    with zf.open(info) as zsrc, open(dest, "wb") as zdst:
+                                        shutil.copyfileobj(zsrc, zdst)
+                                    jobs.append((member, dest))
+                        elif rel.suffix.lower() in _MEDIA_EXT:
+                            rel = _claim(rel)
+                            dest = _in_dir / rel
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest.write_bytes(src.getvalue())
+                            jobs.append((rel, dest))
+                    except Exception as exc:
+                        st.error(f"Could not read {name}: {exc}")
+                        log.error("Compress intake failed for %s: %s", name, exc)
+
+            if not jobs:
+                st.warning("No images or videos found to compress.")
                 st.stop()
 
-            _comp_outputs = []
-            _total_new_mb = 0.0
-            progress = st.progress(0)
-            status   = st.empty()
-
-            for idx, (comp_input, orig_mb) in enumerate(comp_inputs):
-                display_name = comp_input.name.replace("compress_", "")
-                status.markdown(f"Compressing **{display_name}** ({idx+1}/{len(comp_inputs)})…")
-                safe_stem = comp_input.stem.replace("compress_", "")
-                comp_out  = OUTPUT_DIR / f"{safe_stem}.mp4"
-                try:
-                    is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
-                    is_gif   = comp_input.suffix.lower() == ".gif"
-                    if is_image:
-                        image_to_video(comp_input, comp_out, duration=10)
-                    elif is_gif:
-                        colours_map = {"Light": 256, "Medium": 128, "High": 64, "Maximum": 32}
-                        fps_map     = {"Light": 25,  "Medium": 15,  "High": 10, "Maximum": 8}
-                        colours = colours_map[comp_level]
-                        fps     = fps_map[comp_level]
-                        palette = OUTPUT_DIR / f"_palette_{safe_stem}.png"
-                        _run([_FFMPEG_BIN, "-y", "-i", str(comp_input),
-                              "-vf", f"fps={fps},palettegen=max_colors={colours}:stats_mode=diff",
-                              str(palette)])
-                        comp_out = OUTPUT_DIR / f"{safe_stem}.gif"
-                        _run([_FFMPEG_BIN, "-y",
-                              "-i", str(comp_input), "-i", str(palette),
-                              "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
-                              str(comp_out)])
-                        palette.unlink(missing_ok=True)
-                    else:
-                        _run([_FFMPEG_BIN, "-y",
-                              "-i", str(comp_input),
-                              "-c:v", "libx264", "-crf", str(comp_crf),
-                              "-preset", "medium", "-an",
-                              "-movflags", "+faststart",
-                              str(comp_out)])
-                    new_mb = comp_out.stat().st_size / 1_000_000
-                    _total_new_mb += new_mb
-                    _comp_outputs.append((str(comp_out), orig_mb, new_mb))
-                except Exception as exc:
-                    st.error(f"Failed: {display_name} — {exc}")
-                    log.error("Compress failed for %s: %s", display_name, exc)
-                progress.progress((idx + 1) / len(comp_inputs))
-
-            status.empty()
-
-            if _comp_outputs:
-                _zip_path_str = None
-                if len(_comp_outputs) > 1:
+            # Encode in parallel. Each ffmpeg gets a share of the cores, so a
+            # batch of short clips or stills no longer queues behind one file.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            _comp_outputs = []   # (out_path, rel_out, orig_mb, new_mb, kept_original)
+            _failures = []
+            progress = st.progress(0.0, text=f"Compressing 0 of {len(jobs)}…")
+            with ThreadPoolExecutor(max_workers=_COMPRESS_WORKERS) as pool:
+                futs = {pool.submit(compress_one, src, _out_dir / rel, comp_level): (rel, src)
+                        for rel, src in jobs}
+                for done_n, fut in enumerate(as_completed(futs), 1):
+                    rel, src = futs[fut]
                     try:
-                        _zp = zip_outputs([Path(p) for p, _, _ in _comp_outputs], OUTPUT_DIR)
-                        _zip_path_str = str(_zp)
-                    except Exception as _exc:
-                        log.error("ZIP creation failed: %s", _exc)
+                        out, kept = fut.result()
+                        _comp_outputs.append((
+                            str(out), str(out.relative_to(_out_dir)),
+                            src.stat().st_size / 1_000_000,
+                            out.stat().st_size / 1_000_000, kept,
+                        ))
+                    except Exception as exc:
+                        _failures.append(f"{rel}: {str(exc)[-300:]}")
+                        log.error("Compress failed for %s: %s", rel, exc)
+                    progress.progress(done_n / len(jobs),
+                                      text=f"Compressing {done_n} of {len(jobs)}…")
+            progress.empty()
+            _comp_outputs.sort(key=lambda r: r[1])
 
-                st.session_state.comp_results = {
-                    "outputs":       _comp_outputs,
-                    "total_orig_mb": total_orig_mb,
-                    "total_new_mb":  _total_new_mb,
-                    "zip_path":      _zip_path_str,
-                }
+            _zip_path_str = None
+            if len(_comp_outputs) > 1:
+                try:
+                    _zp = zip_outputs([Path(r[0]) for r in _comp_outputs], _run_dir,
+                                      root=_out_dir,
+                                      name=_batch_name([r[1] for r in _comp_outputs]))
+                    _zip_path_str = str(_zp)
+                except Exception as _exc:
+                    log.error("ZIP creation failed: %s", _exc)
+
+            st.session_state.comp_results = {
+                "outputs":       _comp_outputs,
+                "failures":      _failures,
+                "total_orig_mb": sum(r[2] for r in _comp_outputs),
+                "total_new_mb":  sum(r[3] for r in _comp_outputs),
+                "zip_path":      _zip_path_str,
+            }
             st.rerun()
 
     # ── Results — driven by session state, survives all reruns ───────────────
@@ -680,50 +907,61 @@ if st.session_state.active_tab == "compress":
         _t_new   = _res["total_new_mb"]
         _pct     = ((_t_orig - _t_new) / _t_orig * 100) if _t_orig else 0
 
-        st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → {_t_new:.1f} MB ({_pct:.0f}% smaller)")
+        if _outputs:
+            st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → "
+                       f"{_t_new:.1f} MB ({_pct:.0f}% smaller)")
+        _kept = sum(1 for r in _outputs if r[4])
+        if _kept:
+            st.caption(f"{_kept} file(s) were already smaller than a re-encode would be "
+                       "and are included unchanged.")
+        if _res.get("failures"):
+            with st.expander(f"⚠️ {len(_res['failures'])} file(s) failed"):
+                for _f in _res["failures"]:
+                    st.error(_f)
+
         st.markdown("#### 📥 Download")
+        st.dataframe(
+            [{"File": rel, "Original (MB)": round(o, 2), "Compressed (MB)": round(n, 2),
+              "Saved": "unchanged" if kept else f"−{((o - n) / o * 100) if o else 0:.0f}%"}
+             for _, rel, o, n, kept in _outputs],
+            hide_index=True, use_container_width=True,
+            height=min(38 + 35 * len(_outputs), 400),
+        )
 
-        # Summary list (no bytes loaded — just display metadata)
-        for path_str, orig_mb, new_mb in _outputs:
-            _p   = Path(path_str)
-            _pf  = ((orig_mb - new_mb) / orig_mb * 100) if orig_mb else 0
-            _ico = "✓" if _p.exists() else "✗"
-            st.caption(f"{_ico}  {_p.name}  —  {new_mb:.1f} MB  (−{_pf:.0f}%)")
-
-        st.markdown("---")
-
-        _valid = [(p, o, n) for p, o, n in _outputs if Path(p).exists()]
-        if not _valid:
+        _valid = [r for r in _outputs if Path(r[0]).exists()]
+        if _outputs and not _valid:
             st.warning("Output files no longer available. Please compress again.")
-        else:
-            # Individual download button for every file
-            _dl_cols = st.columns(min(len(_valid), 3))
-            for _vi, (_vp, _vo, _vn) in enumerate(_valid):
-                _vp = Path(_vp)
-                _vpf  = ((_vo - _vn) / _vo * 100) if _vo else 0
-                _mime = "image/gif" if _vp.suffix.lower() == ".gif" else "video/mp4"
-                with _dl_cols[_vi % 3]:
-                    st.download_button(
-                        label=f"⬇ {_vp.name}  ({_vn:.1f} MB, −{_vpf:.0f}%)",
-                        data=open(_vp, "rb"),
-                        file_name=_vp.name,
-                        mime=_mime,
-                        key=f"comp_dl_{_vi}",
-                        type="primary",
-                        use_container_width=True,
-                    )
-
-            # ZIP button when there are multiple files
+        elif _valid:
+            # ZIP first — for a folder batch it is the only sensible download.
             _zip_path = _res.get("zip_path")
             if _zip_path and Path(_zip_path).exists():
                 st.download_button(
-                    label="📦 Download All as ZIP",
+                    label=f"📦 Download All as ZIP ({Path(_zip_path).stat().st_size / 1_000_000:.1f} MB)",
                     data=open(_zip_path, "rb"),
                     file_name=Path(_zip_path).name,
                     mime="application/zip",
                     key="comp_dl_zip",
+                    type="primary",
                     use_container_width=True,
                 )
+            # Individual buttons only for small batches; a folder of hundreds
+            # of files would bury the page in buttons.
+            if len(_valid) <= 6:
+                _mimes = {".gif": "image/gif", ".png": "image/png", ".webp": "image/webp",
+                          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".mov": "video/quicktime"}
+                _dl_cols = st.columns(min(len(_valid), 3))
+                for _vi, (_vp, _rel, _vo, _vn, _vk) in enumerate(_valid):
+                    _vp = Path(_vp)
+                    with _dl_cols[_vi % 3]:
+                        st.download_button(
+                            label=f"⬇ {_vp.name}  ({_vn:.1f} MB)",
+                            data=open(_vp, "rb"),
+                            file_name=_vp.name,
+                            mime=_mimes.get(_vp.suffix.lower(), "video/mp4"),
+                            key=f"comp_dl_{_vi}",
+                            type="secondary" if len(_valid) > 1 else "primary",
+                            use_container_width=True,
+                        )
 
         st.markdown("---")
         st.markdown("#### What would you like to do next?")
@@ -744,7 +982,8 @@ if st.session_state.active_tab == "compress":
             if st.button("🗑️ Start Fresh", type="secondary",
                          use_container_width=True, key="comp_next_fresh"):
                 for _k in ["selected_keys", "custom_formats", "ae_template",
-                            "compress_queued_files", "comp_results"]:
+                            "compress_queued_files", "comp_results", "export_results",
+                            "source_sig", "source_path", "importance_boxes"]:
                     st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.session_state.compress_key += 1
@@ -752,7 +991,7 @@ if st.session_state.active_tab == "compress":
                 st.rerun()
 
     elif not (comp_uploaded or _queued):
-        st.info("Upload one or more video files to get started.")
+        st.info("Upload images or videos — individually, as a folder, or as a ZIP — to get started.")
 
 
 # ══════════════════════════════════════════════
@@ -1081,11 +1320,17 @@ if st.session_state.active_tab == "convert":
     input_path = INPUT_DIR / uploaded.name
 
     if st.session_state.get("source_sig") != _sig:
-        for _old in INPUT_DIR.iterdir():
-            try:
-                _old.unlink()
-            except Exception:
-                pass
+        # A new master invalidates everything derived from the old one. The
+        # preview thumbnail was only generated "if not exists", and the previous
+        # export results were re-shown until Export was clicked again — so a
+        # fresh upload kept showing (and offering for download) the last file.
+        for _dir in (INPUT_DIR, PREVIEW_DIR):
+            for _old in _dir.iterdir():
+                try:
+                    _old.unlink()
+                except Exception:
+                    pass
+        st.session_state.pop("export_results", None)
         input_path.write_bytes(_payload)
 
         # ── Image → Video conversion ───────────────
@@ -1191,11 +1436,34 @@ if st.session_state.active_tab == "convert":
     if custom_tmpl:
         effective_templates.append(custom_tmpl)
 
-    all_export_jobs: list[tuple[Template, FormatPlan]] = []
+    # Each job gets its output file name up front. Names were previously built
+    # as "<label>_<WxH>.mp4" at export time, and ten of them collide across
+    # templates (e.g. "Boardwalk_600x720" from both Boardwalk and Portrait
+    # Screens). The later export overwrote the earlier one and the ZIP held the
+    # same entry twice. Identical name + size is the identical file, so those
+    # are exported once.
+    all_export_jobs: list[tuple[Template, FormatPlan, str]] = []
+    _seen_names: set[str] = set()
+    _source_stem = _keep_name(Path(uploaded.name).stem)
     for tmpl in effective_templates:
         for plan in plan_exports(tmpl, video_w, video_h,
                                  importance_boxes=importance_boxes or None):
-            all_export_jobs.append((tmpl, plan))
+            # Outputs keep the master's own name, then the screen and size:
+            # "Summer Sale_Boardwalk_600x720.mp4".
+            _stem = _safe_name(plan.label or tmpl.name)
+            _fname = f"{_source_stem}_{_stem}_{plan.width}x{plan.height}.mp4"
+            if _fname in _seen_names:
+                continue
+            _seen_names.add(_fname)
+            all_export_jobs.append((tmpl, plan, _fname))
+
+    # Results are only valid for the exact source + jobs + settings that made
+    # them; any change hides the stale results until the next export.
+    _export_sig = hashlib.sha256(json.dumps([
+        st.session_state.get("source_sig"),
+        [(f, p.width, p.height, p.crop_x, p.crop_y) for _, p, f in all_export_jobs],
+        crf, preset, resize_mode_key, slot_duration,
+    ]).encode()).hexdigest()[:16]
 
     # ════════════════════════════════════
     # STEP 3 — Export
@@ -1234,9 +1502,8 @@ if st.session_state.active_tab == "convert":
         status_text  = st.empty()
         total        = len(all_export_jobs)
 
-        for i, (tmpl, plan) in enumerate(all_export_jobs):
-            file_label = plan.label if plan.label else tmpl.name.replace(' ', '_')
-            out = OUTPUT_DIR / f"{file_label}_{plan.width}x{plan.height}.mp4"
+        for i, (tmpl, plan, fname) in enumerate(all_export_jobs):
+            out = OUTPUT_DIR / fname
             status_text.markdown(
                 f"⏳ Exporting **{tmpl.name}** — {plan.width}×{plan.height}  ({i+1}/{total})…"
             )
@@ -1253,6 +1520,8 @@ if st.session_state.active_tab == "convert":
                     preset=preset,
                     resize_mode=resize_mode_key,
                     max_duration=slot_duration,
+                    scaled_w=plan.scaled_w,
+                    scaled_h=plan.scaled_h,
                 )
                 output_files.append(out)
                 log.info("Exported %s", out.name)
@@ -1270,10 +1539,11 @@ if st.session_state.active_tab == "convert":
             "errors": errors,
             "total":  total,
             "zip":    None,
+            "sig":    _export_sig,
         }
     else:
         _prev = st.session_state.get("export_results")
-        if not _prev:
+        if not _prev or _prev.get("sig") != _export_sig:
             st.stop()
         output_files = [Path(p) for p in _prev["files"] if Path(p).exists()]
         errors       = list(_prev["errors"])
@@ -1291,7 +1561,8 @@ if st.session_state.active_tab == "convert":
         thumb_cols = st.columns(min(len(output_files), 4))
         for idx, out_file in enumerate(output_files):
             thumb = PREVIEW_DIR / f"thumb_{out_file.stem}.jpg"
-            generate_thumbnail(out_file, thumb)
+            if not thumb.exists():
+                generate_thumbnail(out_file, thumb)
             res = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
             file_size = out_file.stat().st_size / 1_000_000
             with thumb_cols[idx % 4]:
@@ -1324,7 +1595,7 @@ if st.session_state.active_tab == "convert":
             if _cached_zip and Path(_cached_zip).exists():
                 zip_path = Path(_cached_zip)
             else:
-                zip_path = zip_outputs(output_files, OUTPUT_DIR)
+                zip_path = zip_outputs(output_files, OUTPUT_DIR, name=_source_stem)
                 _res["zip"] = str(zip_path)
                 st.session_state.export_results = _res
             st.download_button(
@@ -1343,6 +1614,9 @@ if st.session_state.active_tab == "convert":
         with _na:
             if st.button("🔄 Convert Another File", type="secondary",
                          use_container_width=True, key="next_convert_another"):
+                for _k in ["export_results", "source_sig", "source_path",
+                           "importance_boxes"]:
+                    st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.rerun()
         with _nb:
@@ -1355,7 +1629,8 @@ if st.session_state.active_tab == "convert":
             if st.button("🗑️ Start Fresh", type="secondary",
                          use_container_width=True, key="next_start_fresh"):
                 for _k in ["selected_keys", "custom_formats", "ae_template",
-                            "compress_queued_files", "export_results"]:
+                            "compress_queued_files", "export_results",
+                            "source_sig", "source_path", "importance_boxes"]:
                     st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.session_state.compress_key += 1
