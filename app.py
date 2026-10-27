@@ -1,5 +1,7 @@
 
 import streamlit as st
+import ui
+import hashlib
 import json
 import subprocess
 import datetime
@@ -25,6 +27,40 @@ def _resolve_ffmpeg() -> str:
     return "ffmpeg"
 
 _FFMPEG_BIN = _resolve_ffmpeg()
+
+
+# ── Keep folder paths on folder uploads ───────────────────────────────────────
+# For a folder upload the browser reports each file as "Campaign/Menlyn/ad.jpg"
+# in the widget state, but Streamlit's server stores only the multipart file
+# name ("ad.jpg") and UploadedFile.name comes from that — so the folder and its
+# subfolders were lost before the app ever saw them. Restore the reported path.
+# Wrapped defensively: if Streamlit's internals change, uploads still work and
+# simply arrive without their folder path.
+def _keep_upload_paths() -> None:
+    try:
+        import streamlit.elements.widgets.file_uploader as _fu
+        from streamlit.runtime.uploaded_file_manager import UploadedFile as _UF
+    except Exception:
+        return
+    _orig = getattr(_fu, "_get_upload_files", None)
+    if _orig is None or getattr(_orig, "_keeps_paths", False):
+        return
+
+    def _get_upload_files(widget_value):
+        files = _orig(widget_value)
+        try:
+            names = {i.file_id: i.name for i in widget_value.uploaded_file_info}
+            for f in files:
+                if isinstance(f, _UF) and "/" in names.get(f.file_id, ""):
+                    f.name = names[f.file_id]
+        except Exception:
+            pass
+        return files
+
+    _get_upload_files._keeps_paths = True
+    _fu._get_upload_files = _get_upload_files
+
+_keep_upload_paths()
 
 # ──────────────────────────────────────────────
 # CONFIG & LOGGING
@@ -87,266 +123,42 @@ PREVIEW_DIR = _BASE_IO_DIR / "sessions" / _sess / "previews"
 for _d in (INPUT_DIR, OUTPUT_DIR, PREVIEW_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+# ── Static file serving: files written here are served at /app/static/… ─────
+# This lets downloads bypass Streamlit's Python process RAM entirely.
+STATIC_SESS_DIR = BASE_DIR / "static" / "sessions" / _sess
+STATIC_SESS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Sweep old session static dirs (> 2 h) to keep disk usage low
+import time as _time
+_static_sessions_root = BASE_DIR / "static" / "sessions"
+try:
+    _now_ts = _time.time()
+    for _old_sdir in _static_sessions_root.iterdir():
+        if _old_sdir.name != _sess and _old_sdir.is_dir():
+            try:
+                if _now_ts - _old_sdir.stat().st_mtime > 7200:
+                    shutil.rmtree(_old_sdir, ignore_errors=True)
+            except Exception:
+                pass
+except Exception:
+    pass
+
+# ── Keepalive: ping Streamlit's health endpoint every 30 s to prevent sleep ───
+import streamlit.components.v1 as _stc
+_stc.html("""
+<script>
+(function() {
+    function ping() {
+        fetch('/_stcore/health').catch(function(){});
+    }
+    ping();
+    setInterval(ping, 30000);
+})();
+</script>
+""", height=1)
+
 # ── Global colour theme ────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-/* ── Palette ──────────────────────────────────────────────────────────────────
-   Page bg:        #0d1b2e   deep navy
-   Sidebar bg:     #102540   slightly lighter
-   Panel / card:   #1a3350   medium navy
-   Input bg:       #1e3a5f   lighter navy
-   Border:         #2d5f9e   blue border
-   Accent:         #3b82f6   bright blue
-   Text primary:   #f1f5f9   near-white  (high contrast on dark)
-   Text secondary: #cbd5e1   light grey  (readable on dark)
-   Text muted:     #94a3b8   medium grey
-   Dropdown:       #ffffff   white bg / dark text
-   ──────────────────────────────────────────────────────────────────────────── */
-
-/* ── Page background ─────────────────────────────────────────────────────── */
-[data-testid="stAppViewContainer"],
-[data-testid="stAppViewContainer"] > .main {
-    background-color: #0d1b2e !important;
-}
-
-/* ── Main content text ───────────────────────────────────────────────────── */
-h1, h2, h3, h4, h5, h6 { color: #f1f5f9 !important; }
-/* Scope general text colour to the app container only — NOT dropdowns */
-[data-testid="stAppViewContainer"] p,
-[data-testid="stAppViewContainer"] label,
-[data-testid="stAppViewContainer"] .stMarkdown li { color: #cbd5e1; }
-[data-testid="stCaption"] { color: #94a3b8 !important; }
-[data-testid="stText"]    { color: #cbd5e1 !important; }
-
-/* ── Header bar ──────────────────────────────────────────────────────────── */
-[data-testid="stHeader"] {
-    background-color: #0d1b2e !important;
-    border-bottom: 1px solid #1e3a5f !important;
-}
-
-/* ── Sidebar ─────────────────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background-color: #102540 !important;
-    border-right: 1px solid #2d5f9e !important;
-}
-[data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 { color: #f1f5f9 !important; }
-[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] span,
-[data-testid="stSidebar"] div { color: #cbd5e1 !important; }
-[data-testid="stSidebar"] .stMarkdown hr { border-color: #2d5f9e !important; }
-
-/* ── Tabs ────────────────────────────────────────────────────────────────── */
-[data-testid="stTabs"] [data-baseweb="tab-list"] {
-    background-color: #1a3350 !important;
-    border-radius: 8px !important;
-    padding: 4px !important;
-    gap: 4px !important;
-}
-[data-testid="stTabs"] [data-baseweb="tab"] {
-    color: #94a3b8 !important;
-    border-radius: 6px !important;
-    font-weight: 600 !important;
-}
-[data-testid="stTabs"] [aria-selected="true"] {
-    background-color: #2d5f9e !important;
-    color: #f1f5f9 !important;
-}
-
-/* ── Buttons ─────────────────────────────────────────────────────────────── */
-[data-testid="stButton"] > button[kind="primary"] {
-    background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
-    border: none !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-    border-radius: 10px !important;
-    box-shadow: 0 4px 16px rgba(59,130,246,0.35) !important;
-}
-[data-testid="stButton"] > button[kind="primary"] p,
-[data-testid="stButton"] > button[kind="primary"] span {
-    color: #ffffff !important;
-    font-weight: 700 !important;
-}
-[data-testid="stButton"] > button[kind="primary"]:hover {
-    box-shadow: 0 6px 22px rgba(59,130,246,0.55) !important;
-    filter: brightness(1.1) !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] {
-    background: #1a3350 !important;
-    border: 1px solid #3b82f6 !important;
-    color: #93c5fd !important;
-    font-weight: 600 !important;
-    border-radius: 10px !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] p,
-[data-testid="stButton"] > button[kind="secondary"] span {
-    color: #93c5fd !important;
-}
-
-/* ── Nav buttons — fixed height so they never resize on tab switch ────────── */
-[data-testid="stButton"][data-key="nav_convert"] > button,
-[data-testid="stButton"][data-key="nav_compress"] > button {
-    height: 48px !important;
-    min-height: 48px !important;
-    max-height: 48px !important;
-    white-space: nowrap !important;
-    text-align: center !important;
-    font-size: 0.95rem !important;
-    padding: 0 28px !important;
-}
-[data-testid="stButton"][data-key="nav_convert"] > button p,
-[data-testid="stButton"][data-key="nav_convert"] > button span,
-[data-testid="stButton"][data-key="nav_compress"] > button p,
-[data-testid="stButton"][data-key="nav_compress"] > button span {
-    text-align: center !important;
-    white-space: nowrap !important;
-    color: inherit !important;
-}
-[data-testid="stButton"] > button[kind="secondary"]:hover {
-    background: #1e3a5f !important;
-}
-
-/* ── Text / Number inputs ────────────────────────────────────────────────── */
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    color: #f1f5f9 !important;
-    border-radius: 6px !important;
-}
-[data-testid="stTextInput"] input::placeholder,
-[data-testid="stNumberInput"] input::placeholder { color: #94a3b8 !important; }
-[data-testid="stTextInput"] label,
-[data-testid="stNumberInput"] label { color: #cbd5e1 !important; }
-[data-testid="stNumberInput"] > div {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-}
-[data-testid="stNumberInput"] button {
-    background-color: #2d5f9e !important;
-    border-color: #2d5f9e !important;
-    color: #ffffff !important;
-}
-[data-testid="stNumberInput"] button:hover { background-color: #3b82f6 !important; }
-
-/* ── Selectbox ───────────────────────────────────────────────────────────── */
-[data-testid="stSelectbox"] label { color: #cbd5e1 !important; }
-[data-testid="stSelectbox"] div[data-baseweb="select"] {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-}
-[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-    background-color: #1e3a5f !important;
-    color: #f1f5f9 !important;
-}
-
-/* ── Multiselect ─────────────────────────────────────────────────────────── */
-[data-testid="stMultiSelect"] label { color: #cbd5e1 !important; }
-
-/* Outer wrapper — one unified dark box */
-[data-testid="stMultiSelect"] div[data-baseweb="select"],
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div > div {
-    background-color: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 6px !important;
-    color: #f1f5f9 !important;
-}
-/* Remove any inner borders that create a double-box look */
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
-    border: none !important;
-}
-/* Search input inside the box */
-[data-testid="stMultiSelect"] input {
-    background-color: #1e3a5f !important;
-    color: #f1f5f9 !important;
-    border: none !important;
-    outline: none !important;
-}
-[data-testid="stMultiSelect"] input::placeholder { color: #94a3b8 !important; }
-/* Selected tags */
-[data-testid="stMultiSelect"] [data-baseweb="tag"] {
-    background-color: #2d5f9e !important;
-    color: #ffffff !important;
-    border-radius: 4px !important;
-}
-[data-testid="stMultiSelect"] [data-baseweb="tag"] span,
-[data-testid="stMultiSelect"] [data-baseweb="tag"] svg { color: #ffffff !important; }
-
-/* ── Dropdown popover (white bg, dark readable text) ─────────────────────── */
-[data-baseweb="popover"],
-[data-baseweb="popover"] ul,
-[data-baseweb="menu"] {
-    background-color: #ffffff !important;
-    border: 1px solid #cbd5e1 !important;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.18) !important;
-    border-radius: 8px !important;
-}
-/* Every element inside the popover gets dark text */
-[data-baseweb="popover"] *,
-[data-baseweb="menu"] *,
-[role="listbox"] *,
-[role="option"] * {
-    color: #1e293b !important;
-    background-color: transparent !important;
-}
-/* Row backgrounds */
-[data-baseweb="menu"] li,
-[data-baseweb="option"],
-[role="option"] {
-    background-color: #ffffff !important;
-    font-weight: 500 !important;
-}
-[data-baseweb="menu"] li:hover,
-[data-baseweb="option"]:hover,
-[role="option"]:hover {
-    background-color: #dbeafe !important;
-}
-
-/* ── Slider ──────────────────────────────────────────────────────────────── */
-[data-testid="stSlider"] label { color: #cbd5e1 !important; }
-[data-testid="stSlider"] [data-testid="stTickBarMin"],
-[data-testid="stSlider"] [data-testid="stTickBarMax"] { color: #94a3b8 !important; }
-
-/* ── Toggle ──────────────────────────────────────────────────────────────── */
-[data-testid="stToggle"] label,
-[data-testid="stToggle"] p { color: #cbd5e1 !important; }
-
-/* ── File uploader ───────────────────────────────────────────────────────── */
-[data-testid="stFileUploader"] {
-    background-color: #1a3350 !important;
-    border: 2px dashed #2d5f9e !important;
-    border-radius: 10px !important;
-}
-[data-testid="stFileUploader"] label,
-[data-testid="stFileUploader"] span,
-[data-testid="stFileUploader"] p { color: #cbd5e1 !important; }
-[data-testid="stFileUploader"] button { color: #93c5fd !important; }
-
-/* ── Expanders ───────────────────────────────────────────────────────────── */
-[data-testid="stExpander"] {
-    background-color: #1a3350 !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 8px !important;
-}
-[data-testid="stExpander"] summary { color: #f1f5f9 !important; font-weight: 600 !important; }
-[data-testid="stExpander"] summary p { color: #f1f5f9 !important; }
-
-/* ── Alert / info boxes ──────────────────────────────────────────────────── */
-[data-testid="stAlert"] { border-radius: 8px !important; }
-[data-testid="stAlert"] p { color: inherit !important; }
-
-/* ── Progress / spinner ──────────────────────────────────────────────────── */
-[data-testid="stProgress"] > div > div { background-color: #3b82f6 !important; }
-
-/* ── Dividers ────────────────────────────────────────────────────────────── */
-hr { border-color: #1e3a5f !important; }
-</style>
-""", unsafe_allow_html=True)
+ui.inject_theme()
 
 # ──────────────────────────────────────────────
 # DATA CLASSES
@@ -448,27 +260,46 @@ def export_format(
     crf: int = 18,
     preset: str = "slow",
     resize_mode: str = "crop",
+    max_duration: "int | None" = None,
+    scaled_w: int = 0,
+    scaled_h: int = 0,
 ) -> subprocess.CompletedProcess:
     """Export a video to the target resolution.
 
     resize_mode:
-      "crop"    — scale up then centre-crop (no distortion, may cut edges)
+      "crop"    — scale up then crop (no distortion, may cut edges)
       "stretch" — scale directly to exact dimensions (may squash/stretch)
+
+    crop_x / crop_y are in the coordinate space of the scaled frame
+    (scaled_w × scaled_h). The scale is given explicitly rather than left to
+    force_original_aspect_ratio, whose rounding differed from the planner's —
+    the crop origin then pointed at a frame of a different size.
+
+    max_duration:
+      Hard cap in seconds. DOOH playout slots are fixed, so anything longer is
+      trimmed to fit. Sources already under the cap are left untouched — padding
+      them would alter the creative. Previously no cap existed at all and
+      uploaded videos exported at their original length.
     """
-    if resize_mode == "stretch":
-        vf = f"scale={width}:{height}"
+    if resize_mode == "stretch" or not (scaled_w and scaled_h):
+        vf = f"scale={width}:{height}:flags=lanczos,setsar=1"
     else:
         vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height}:{crop_x}:{crop_y}"
+            f"scale={scaled_w}:{scaled_h}:flags=lanczos,"
+            f"crop={width}:{height}:{crop_x}:{crop_y},setsar=1"
         )
-    cmd = [
-        _FFMPEG_BIN, "-y",
-        "-i", str(src),
+    cmd = [_FFMPEG_BIN, "-y", "-i", str(src)]
+    if max_duration:
+        cmd += ["-t", str(max_duration)]
+    cmd += [
         "-vf", vf,
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", preset,
+        # Without this, 4:2:2 / 4:4:4 masters (ProRes, PNG) produced High 4:2:2
+        # profile files that many screen players refuse to decode.
+        "-pix_fmt", "yuv420p",
+        "-an",
         "-movflags", "+faststart",
         str(dst),
     ]
@@ -513,6 +344,8 @@ class FormatPlan:
     crop_x: int = 0
     crop_y: int = 0
     label: str = ""
+    scaled_w: int = 0
+    scaled_h: int = 0
 
 
 def plan_exports(
@@ -521,32 +354,63 @@ def plan_exports(
     video_h: int,
     importance_boxes: list = None,
 ) -> list[FormatPlan]:
-    """Centre-crop plan, or smart-crop when importance_boxes are provided."""
+    """Centre-crop plan, or smart-crop when importance_boxes are provided.
+
+    Crop origins are in the scaled frame. The centre crop used to be computed
+    from the *source* size, so any target larger than or shaped differently
+    from the source came out off-centre (a 1920×1080 master cropped to
+    1080×1920 was cut 420px from the left instead of 1166px).
+    """
+    from smart_crop import smart_crop_origin, _scaled_dims
     plans = []
     for fmt in template.formats:
         target_w, target_h = fmt[0], fmt[1]
         label = fmt[2] if len(fmt) > 2 else ""
+        scaled_w, scaled_h = _scaled_dims(video_w, video_h, target_w, target_h)
         if importance_boxes:
-            from smart_crop import smart_crop_origin
             crop_x, crop_y = smart_crop_origin(
                 video_w, video_h, target_w, target_h, importance_boxes
             )
         else:
-            crop_x = max(0, (video_w - target_w) // 2)
-            crop_y = max(0, (video_h - target_h) // 2)
-        plans.append(FormatPlan(width=target_w, height=target_h, crop_x=crop_x, crop_y=crop_y, label=label))
+            crop_x = (scaled_w - target_w) // 2
+            crop_y = (scaled_h - target_h) // 2
+        plans.append(FormatPlan(width=target_w, height=target_h, crop_x=crop_x,
+                                crop_y=crop_y, label=label,
+                                scaled_w=scaled_w, scaled_h=scaled_h))
     return plans
+
+
+def _keep_name(text: str) -> str:
+    """The user's own file name, kept as typed (spaces, case, punctuation) —
+    only characters that are invalid in file names on Windows or macOS go."""
+    import re
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text).strip(" .") or "export"
+
+
+def _safe_name(text: str) -> str:
+    """Filesystem-safe file stem: no path separators or shell-hostile characters."""
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._") or "export"
 
 
 # ──────────────────────────────────────────────
 # ZIP HELPER
 # ──────────────────────────────────────────────
 
-def zip_outputs(files: list[Path], output_dir: Path) -> Path:
-    zip_path = output_dir / f"export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+def zip_outputs(files: list[Path], output_dir: Path, root: Optional[Path] = None,
+                name: str = "export") -> Path:
+    """Bundle files into a ZIP. With `root`, entries keep their folder path
+    relative to it; otherwise they are stored flat by file name.
+
+    Entries are stored, not deflated: MP4/JPEG/PNG are already compressed, so
+    deflate only burned CPU time for a ~1% gain."""
+    # Named after the user's own files, without a timestamp suffix. Each
+    # export/compress run writes into a freshly cleared directory, so this
+    # cannot collide with a previous run's ZIP.
+    zip_path = output_dir / f"{name}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for f in files:
-            zf.write(f, f.name)
+            zf.write(f, str(f.relative_to(root)) if root else f.name)
     return zip_path
 
 
@@ -558,119 +422,70 @@ if "welcomed" not in st.session_state:
     st.session_state.welcomed = False
 
 if not st.session_state.welcomed:
-    _logo_path = BASE_DIR / "img" / "logo_white.png"
-
     import base64 as _b64
-    _logo_b64 = ""
+    _logo_path = BASE_DIR / "img" / "logo_white.png"
+    _logo_tag = ""
     if _logo_path.exists():
-        _logo_b64 = _b64.b64encode(_logo_path.read_bytes()).decode()
-
-    _logo_tag = f"<img src='data:image/png;base64,{_logo_b64}' style='max-width:220px;width:100%;display:block;margin:0 auto 20px' />" if _logo_b64 else ""
+        _b = _b64.b64encode(_logo_path.read_bytes()).decode()
+        _logo_tag = (f"<img src='data:image/png;base64,{_b}' alt='Primedia Malls' "
+                     "style='max-width:180px;width:100%;display:block;margin:0 auto 28px' />")
 
     st.markdown(f"""
 <style>
-[data-testid="stAppViewContainer"] {{ background: #0d1b2e !important; }}
-[data-testid="stHeader"]  {{ background: transparent !important; border: none !important; }}
-[data-testid="stSidebar"] {{ display: none !important; }}
-
-/* Vertically centre the content area */
-[data-testid="stMainBlockContainer"] {{
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    min-height: 95vh !important;
-    padding: 20px !important;
+[data-testid="stSidebar"] {{ display: none; }}
+[data-testid="stMainBlockContainer"] {{ max-width: 720px; padding-top: 8vh; }}
+.w-eyebrow {{
+    color: var(--c-text-muted); font-size: .76rem; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; text-align: center;
 }}
-
-/* Style the block container itself as the card */
-[data-testid="stMainBlockContainer"] > .block-container {{
-    background: #1e3a5f !important;
-    border: 1px solid #2d5f9e !important;
-    border-radius: 20px !important;
-    padding: 44px 52px 40px !important;
-    max-width: 560px !important;
-    width: 100% !important;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.55) !important;
-    text-align: center !important;
+.w-title {{
+    color: var(--c-text); font-size: 2.1rem; font-weight: 700;
+    letter-spacing: -.025em; text-align: center; margin: var(--s-3) 0 var(--s-2);
 }}
-
-.wdivider {{
-    width: 48px; height: 3px;
-    background: linear-gradient(90deg, #3b82f6, #60a5fa);
-    border-radius: 2px; margin: 12px auto 16px;
+.w-sub {{
+    color: var(--c-text-secondary); font-size: .96rem; text-align: center;
+    max-width: 46ch; margin: 0 auto var(--s-6);
 }}
-.weyebrow {{
-    font-size: 0.72rem; font-weight: 600; color: #93c5fd;
-    letter-spacing: 0.22em; text-transform: uppercase;
+.w-feats {{
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s-3);
+    margin-top: var(--s-6);
 }}
-.wtitle {{
-    font-size: 2rem; font-weight: 800; color: #f1f5f9;
-    letter-spacing: -0.5px; margin: 0 0 28px; line-height: 1.1;
+.w-feat {{
+    background: var(--c-surface); border: 1px solid var(--c-border);
+    border-radius: var(--r-card); padding: var(--s-4);
 }}
-.wfeats {{
-    display: flex; gap: 10px; flex-wrap: wrap;
-    justify-content: center; margin-top: 20px;
-}}
-.wfeat {{
-    background: #142034; border: 1px solid #2d5f9e;
-    border-radius: 10px; padding: 12px 10px;
-    flex: 1; min-width: 100px; max-width: 130px;
-}}
-.wfeat-icon {{ font-size: 1.3rem; margin-bottom: 5px; }}
-.wfeat-lbl  {{ font-size: 0.73rem; color: #f1f5f9; font-weight: 600; line-height: 1.3; }}
-.wfeat-desc {{ font-size: 0.66rem; color: #aac4e8; margin-top: 3px; line-height: 1.3; }}
-
-/* Welcome CTA button — white, centred, bold */
-.welcome-btn [data-testid="stButton"] {{
-    display: flex !important;
-    justify-content: center !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] {{
-    background: #ffffff !important;
-    color: #0d1b2e !important;
-    border: none !important;
-    font-weight: 800 !important;
-    font-size: 1.05rem !important;
-    letter-spacing: 0.02em !important;
-    padding: 16px 48px !important;
-    border-radius: 50px !important;
-    width: auto !important;
-    min-width: 240px !important;
-    box-shadow: 0 4px 20px rgba(255,255,255,0.15) !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] p,
-.welcome-btn [data-testid="stButton"] > button[kind="primary"] span {{
-    color: #0d1b2e !important;
-    font-weight: 800 !important;
-}}
-.welcome-btn [data-testid="stButton"] > button[kind="primary"]:hover {{
-    background: #e2e8f0 !important;
-    box-shadow: 0 6px 28px rgba(255,255,255,0.25) !important;
+.w-feat-lbl  {{ color: var(--c-text); font-weight: 600; font-size: .9rem; }}
+.w-feat-desc {{ color: var(--c-text-muted); font-size: .82rem; margin-top: 2px; }}
+@media (max-width: 640px) {{
+    .w-feats {{ grid-template-columns: 1fr; }}
+    .w-title {{ font-size: 1.6rem; }}
 }}
 </style>
 
-<div style="text-align:center">
-  {_logo_tag}
-  <div class="weyebrow">Powered by Primedia Out of Home</div>
-  <div class="wdivider"></div>
-  <div class="wtitle">AdScreen Converter</div>
-</div>
+{_logo_tag}
+<div class="w-eyebrow">Primedia Out of Home</div>
+<div class="w-title">AdScreen Converter</div>
+<div class="w-sub">Export one master file to every mall screen format — correctly
+sized, cropped and compressed.</div>
 """, unsafe_allow_html=True)
 
-    st.markdown('<div class="welcome-btn">', unsafe_allow_html=True)
-    col_a, col_b, col_c = st.columns([1, 1, 1])
-    with col_b:
-        if st.button("✦  Let's Get Started", type="primary", use_container_width=True):
+    _wa, _wb, _wc = st.columns([1, 1.4, 1])
+    with _wb:
+        if st.button("Get started", type="primary", use_container_width=True,
+                     key="welcome_start"):
             st.session_state.welcomed = True
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("""
-<div class="wfeats">
-  <div class="wfeat"><div class="wfeat-icon">🖥️</div><div class="wfeat-lbl">Multi-Format Export</div><div class="wfeat-desc">All screen sizes in one click</div></div>
-  <div class="wfeat"><div class="wfeat-icon">🧠</div><div class="wfeat-lbl">Smart Crop AI</div><div class="wfeat-desc">Keeps faces &amp; logos in frame</div></div>
-  <div class="wfeat"><div class="wfeat-icon">📦</div><div class="wfeat-lbl">Compression</div><div class="wfeat-desc">Smaller files, same quality</div></div>
-  <div class="wfeat"><div class="wfeat-icon">📐</div><div class="wfeat-lbl">Custom Sizes</div><div class="wfeat-desc">Any ratio or resolution</div></div>
+<div class="w-feats">
+  <div class="w-feat"><div class="w-feat-lbl">Multi-format export</div>
+    <div class="w-feat-desc">Every selected screen size in one run</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Smart crop</div>
+    <div class="w-feat-desc">Keeps the busiest part of the frame in shot</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Compression</div>
+    <div class="w-feat-desc">Hit a target file size without visible loss</div></div>
+  <div class="w-feat"><div class="w-feat-lbl">Custom sizes</div>
+    <div class="w-feat-desc">Any resolution or aspect ratio</div></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -682,18 +497,28 @@ if not st.session_state.welcomed:
 # ──────────────────────────────────────────────
 
 with st.sidebar:
-    st.image("https://cdn.prod.website-files.com/637c4a14cf822a674336049c/699f40327d75665a5a6c8852_9aa2876621654cf23c5bf38ab087b8f0_primedia-malls.png", use_container_width=True)
-    st.markdown("---")
+    _sidebar_logo = BASE_DIR / "img" / "logo_white.png"
+    if _sidebar_logo.exists():
+        st.image(str(_sidebar_logo), use_container_width=True)
 
-    st.subheader("⚙️ System")
-    if ffmpeg_available():
-        st.success(f"FFmpeg detected (`{_FFMPEG_BIN}`)")
-    else:
-        st.error(f"FFmpeg not found (tried: `{_FFMPEG_BIN}`)")
+    # Smart Crop's capability depends on what is actually installed. The UI used
+    # to promise "YOLOv8 + EasyOCR" unconditionally; neither is in
+    # requirements.txt, so it silently ran OpenCV saliency instead. Report the
+    # tier that will really be used.
+    @st.cache_data(ttl=300)
+    def _detection_tier() -> str:
+        try:
+            import ultralytics  # noqa: F401
+            return "object detection (YOLOv8)"
+        except Exception:
+            return "edge & saliency detection (OpenCV)"
 
-    st.markdown("---")
-    st.subheader("🎛️ Export Settings")
-
+    use_smart_crop = st.toggle(
+        "Smart crop",
+        value=True,
+        help=f"Finds the busiest part of the frame using {_detection_tier()} and "
+             "shifts the crop so it stays in shot. Applies to Crop to Fit only.",
+    )
     resize_mode = st.radio(
         "Resize mode",
         options=["Crop to Fit", "Stretch to Fit"],
@@ -706,23 +531,47 @@ with st.sidebar:
     )
     resize_mode_key = "crop" if resize_mode == "Crop to Fit" else "stretch"
 
-    use_smart_crop = st.toggle(
-        "🧠 Smart Crop (AI)",
-        value=True,
-        help="Uses YOLOv8 + EasyOCR to detect faces, text, logos and packshots, "
-             "then adjusts the crop origin so they stay in frame.",
+    # DOOH playout slots are fixed lengths, so every export is capped here.
+    # 10s and 15s are the standard slots; Custom covers non-standard bookings.
+    _slot_choice = st.radio(
+        "Output duration",
+        options=[10, 15, "custom"],
+        format_func=lambda s_: "Custom" if s_ == "custom" else f"{s_} seconds",
+        index=0,
+        horizontal=True,
+        help="Stills are rendered to exactly this length. Videos longer than "
+             "this are trimmed to fit; shorter videos are left as they are.",
     )
-    crf    = st.slider("CRF (quality — lower = better)", 12, 28, 18, help="18 is visually lossless for H.264")
-    preset = st.selectbox("Encoding preset", ["ultrafast","fast","medium","slow","veryslow"], index=3)
-    img_duration = st.number_input("Image → Video duration (s)", 3, 60, 10)
+    if _slot_choice == "custom":
+        slot_duration = int(st.number_input(
+            "Custom duration (seconds)",
+            min_value=1, max_value=300, value=20, step=1,
+            key="custom_slot_duration",
+        ))
+    else:
+        slot_duration = _slot_choice
 
-    st.markdown("---")
-    st.subheader("📋 Log")
-    if st.button("View app.log"):
-        try:
-            st.text_area("", _log_path.read_text()[-3000:], height=200)
-        except FileNotFoundError:
-            st.info("No log file yet.")
+    # Encoder settings are set-once expert controls — progressive disclosure
+    # rather than permanent real estate.
+    with st.expander("Encoding options"):
+        crf    = st.slider("Quality (CRF — lower is better)", 12, 28, 18,
+                           help="18 is visually lossless for H.264.")
+        preset = st.selectbox("Encoding preset",
+                              ["ultrafast", "fast", "medium", "slow", "veryslow"], index=3,
+                              help="Slower presets give smaller files at the same quality.")
+
+    with st.expander("Diagnostics"):
+        if ffmpeg_available():
+            st.caption(f"FFmpeg ready — `{_FFMPEG_BIN}`")
+        else:
+            st.error(f"FFmpeg not found (tried `{_FFMPEG_BIN}`). Exports will fail.")
+        st.caption(f"Smart crop tier: {_detection_tier()}")
+        if st.button("Show recent log", use_container_width=True):
+            try:
+                st.text_area("Recent log output", _log_path.read_text()[-3000:],
+                             height=200, label_visibility="collapsed")
+            except FileNotFoundError:
+                st.caption("No log file yet.")
 
 
 # ──────────────────────────────────────────────
@@ -733,57 +582,14 @@ with st.sidebar:
 # UI  ─  MAIN
 # ──────────────────────────────────────────────
 
-st.title("🎬 AdScreen Converter")
-st.caption("Automated multi-format video export for digital-out-of-home advertising")
+ui.page_header("AdScreen Converter",
+               "Multi-format video export for digital out-of-home advertising")
 
 # ── Page navigation buttons ────────────────────────────────────────────────────
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "convert"
 
-st.markdown("""
-<style>
-.nav-bar [data-testid="stButton"] > button {
-    height: 48px !important;
-    min-height: 48px !important;
-    border-radius: 10px !important;
-    font-size: 0.95rem !important;
-    font-weight: 600 !important;
-    white-space: nowrap !important;
-    padding: 0 28px !important;
-    width: 100% !important;
-    transition: all 0.15s ease !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="primary"] {
-    background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
-    border: none !important;
-    color: #ffffff !important;
-    box-shadow: 0 4px 14px rgba(59,130,246,0.4) !important;
-    text-align: center !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="secondary"] {
-    background: #1a3350 !important;
-    border: 1px solid #2d5f9e !important;
-    color: #93c5fd !important;
-    text-align: center !important;
-}
-.nav-bar [data-testid="stButton"] > button[kind="secondary"]:hover {
-    background: #1e3a5f !important;
-    border-color: #3b82f6 !important;
-    color: #f1f5f9 !important;
-    min-height: 48px !important;
-    max-height: 48px !important;
-}
-.nav-bar [data-testid="stButton"] > button p,
-.nav-bar [data-testid="stButton"] > button span {
-    text-align: center !important;
-    color: inherit !important;
-    white-space: nowrap !important;
-    font-size: 0.95rem !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
-st.markdown('<div class="nav-bar">', unsafe_allow_html=True)
 nav_col1, nav_col2, nav_spacer = st.columns([2, 2, 5])
 with nav_col1:
     if st.button(
@@ -803,7 +609,6 @@ with nav_col2:
     ):
         st.session_state.active_tab = "compress"
         st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -811,9 +616,121 @@ st.markdown("---")
 # PAGE 2 — COMPRESS
 # ══════════════════════════════════════════════
 
+_IMG_EXT   = {".jpg", ".jpeg", ".png", ".webp"}
+_VID_EXT   = {".mp4", ".mov", ".m4v"}
+_GIF_EXT   = {".gif"}
+_MEDIA_EXT = _IMG_EXT | _VID_EXT | _GIF_EXT
+
+# level: (video CRF, JPEG/WebP quality, GIF colours, GIF fps)
+# Resolution is never changed. The old CRF ladder (22/28/34/40) went well past
+# the point of visible blocking; this one tops out where H.264 still holds up
+# on a large screen.
+COMPRESS_LEVELS = {
+    "Light":   (20, 92, 256, 25),
+    "Medium":  (23, 86, 192, 20),
+    "High":    (26, 80, 128, 15),
+    "Maximum": (30, 72, 64, 12),
+}
+
+COMPRESS_ROOT = _BASE_IO_DIR / "sessions" / _sess / "compress"
+
+import os as _os
+_COMPRESS_WORKERS = max(1, min(4, (_os.cpu_count() or 2) // 2))
+_FFMPEG_THREADS   = max(1, (_os.cpu_count() or 2) // _COMPRESS_WORKERS)
+
+
+def _clean_relpath(name: str) -> Optional[Path]:
+    """Turn an uploaded name ("Campaign/Rosebank/ad.jpg") into a safe relative
+    path, dropping anything that could climb out of the work directory."""
+    from pathlib import PurePosixPath
+    parts = [p for p in PurePosixPath(name.replace("\\", "/")).parts
+             if p not in ("", ".", "..", "/")]
+    # __MACOSX/ and ._name are Finder metadata inside ZIPs, not media.
+    if not parts or parts[0] == "__MACOSX" or parts[-1].startswith("."):
+        return None
+    return Path(*parts)
+
+
+def _batch_name(rel_paths: list[str]) -> str:
+    """ZIP name for a compress batch, taken from the user's own names:
+    the uploaded folder if everything came from one; otherwise the part the
+    file names share ("Summer Sale 1080x1920", "Summer Sale 600x720" →
+    "Summer Sale"); otherwise the first file's name."""
+    import os.path
+    paths = [Path(p) for p in rel_paths]
+    tops = {p.parts[0] for p in paths if len(p.parts) > 1}
+    if len(tops) == 1 and all(len(p.parts) > 1 for p in paths):
+        return _keep_name(tops.pop())
+    stems = sorted(p.stem for p in paths)
+    shared = os.path.commonprefix(stems).rstrip(" _-.(")
+    if len(paths) > 1 and len(shared) >= 3:
+        return _keep_name(shared)
+    return _keep_name(stems[0])
+
+
+def compress_one(src: Path, dst: Path, level: str) -> tuple[Path, bool]:
+    """Compress one file at its original resolution.
+
+    Returns (written_path, kept_original). If the re-encode comes out no
+    smaller than the source — common for files that were already exported
+    efficiently — the original is copied through instead.
+    """
+    v_crf, img_q, gif_colours, gif_fps = COMPRESS_LEVELS[level]
+    ext = src.suffix.lower()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if ext in _IMG_EXT:
+        from PIL import Image
+        out = dst.with_suffix(ext)
+        with Image.open(src) as im:
+            extra = {k: im.info[k] for k in ("icc_profile", "exif") if im.info.get(k)}
+            if ext in (".jpg", ".jpeg"):
+                if im.mode not in ("RGB", "L", "CMYK"):
+                    im = im.convert("RGB")
+                im.save(out, "JPEG", quality=img_q, optimize=True, progressive=True,
+                        subsampling=0 if level == "Light" else 2, **extra)
+            elif ext == ".webp":
+                im.save(out, "WEBP", quality=img_q, method=6, **extra)
+            else:  # PNG — lossless at Light/Medium, palette at High/Maximum
+                if level in ("High", "Maximum"):
+                    colours = 256 if level == "High" else 128
+                    method = (Image.Quantize.FASTOCTREE if im.mode == "RGBA"
+                              else Image.Quantize.MEDIANCUT)
+                    im = im.convert("RGBA" if "A" in im.mode else "RGB")
+                    im = im.quantize(colors=colours, method=method,
+                                     dither=Image.Dither.FLOYDSTEINBERG)
+                im.save(out, "PNG", optimize=True,
+                        **{k: v for k, v in extra.items() if k == "icc_profile"})
+    elif ext in _GIF_EXT:
+        out = dst.with_suffix(".gif")
+        palette = out.with_name(f"_palette_{out.stem}.png")
+        _run([_FFMPEG_BIN, "-y", "-i", str(src),
+              "-vf", f"fps={gif_fps},palettegen=max_colors={gif_colours}:stats_mode=diff",
+              str(palette)])
+        _run([_FFMPEG_BIN, "-y", "-i", str(src), "-i", str(palette),
+              "-filter_complex", f"fps={gif_fps}[x];[x][1:v]paletteuse=dither=bayer",
+              str(out)])
+        palette.unlink(missing_ok=True)
+    else:
+        out = dst.with_suffix(".mp4")
+        _run([_FFMPEG_BIN, "-y", "-i", str(src),
+              "-c:v", "libx264", "-crf", str(v_crf), "-preset", "medium",
+              "-pix_fmt", "yuv420p", "-threads", str(_FFMPEG_THREADS),
+              "-an", "-movflags", "+faststart",
+              str(out)])
+
+    if out.stat().st_size >= src.stat().st_size:
+        out.unlink(missing_ok=True)
+        out = dst.with_suffix(src.suffix)
+        shutil.copyfile(src, out)
+        return out, True
+    return out, False
+
+
 if st.session_state.active_tab == "compress":
     st.subheader("Reduce File Size")
-    st.caption("Re-encodes your video at a lower bitrate without changing the resolution or cropping.")
+    st.caption("Re-encodes images and videos to smaller files. Resolution is never "
+               "changed and nothing is cropped. Folders keep their structure in the ZIP.")
 
     # Check if output files were passed over from the convert tab
     _queued = st.session_state.get("compress_queued_files", [])
@@ -825,177 +742,261 @@ if st.session_state.active_tab == "compress":
             st.session_state.compress_queued_files = []
             st.rerun()
 
-    comp_uploaded = st.file_uploader(
-        "📤 Upload files to compress (MP4, MOV, GIF, JPG, PNG)",
-        type=["mp4", "mov", "gif", "jpg", "jpeg", "png"],
-        key=f"compress_upload_{st.session_state.compress_key}",
-        accept_multiple_files=True,
+    _src_mode = st.radio(
+        "Upload",
+        ["Files", "Folder"],
+        horizontal=True,
+        key="comp_src_mode",
+        help="**Files** — pick any number of files, or ZIP archives of folders.\n\n"
+             "**Folder** — pick one folder; every image and video inside it "
+             "(including subfolders) is compressed.",
     )
+    if _src_mode == "Folder":
+        comp_uploaded = st.file_uploader(
+            "📁 Choose a folder (JPG, PNG, WEBP, GIF, MP4, MOV)",
+            type=sorted(e.lstrip(".") for e in _MEDIA_EXT),
+            key=f"compress_dir_{st.session_state.compress_key}",
+            accept_multiple_files="directory",
+        )
+    else:
+        comp_uploaded = st.file_uploader(
+            "📤 Upload files to compress (JPG, PNG, WEBP, GIF, MP4, MOV, or ZIP)",
+            type=sorted(e.lstrip(".") for e in _MEDIA_EXT) + ["zip"],
+            key=f"compress_upload_{st.session_state.compress_key}",
+            accept_multiple_files=True,
+        )
+    comp_uploaded = comp_uploaded or []
 
     if comp_uploaded or _queued:
         comp_level = st.select_slider(
             "Compression level",
-            options=["Light", "Medium", "High", "Maximum"],
+            options=list(COMPRESS_LEVELS),
             value="Medium",
-            help="Light = best quality / larger file.  Maximum = smallest file / lower quality.",
+            key="comp_level_slider",
+            help="Light = best quality / larger file.  Maximum = smallest file. "
+                 "Resolution stays the same at every level.",
         )
-        crf_map = {"Light": 22, "Medium": 28, "High": 34, "Maximum": 40}
-        comp_crf = crf_map[comp_level]
 
-        # Build input list: uploaded files + queued files from convert tab
+        # Show file list using metadata only — no f.read() here, runs on every render
         total_orig_mb = 0.0
-        comp_inputs = []
+        file_meta = []   # (display_name, size_mb, is_queued, source)
         for f in comp_uploaded:
-            comp_input = INPUT_DIR / f"compress_{f.name}"
-            comp_input.write_bytes(f.read())
-            mb = comp_input.stat().st_size / 1_000_000
+            mb = (getattr(f, "size", None) or 0) / 1_000_000
             total_orig_mb += mb
-            comp_inputs.append((comp_input, mb))
+            file_meta.append((f.name, mb, False, f))
         for p in _queued:
             p = Path(p)
             mb = p.stat().st_size / 1_000_000
             total_orig_mb += mb
-            comp_inputs.append((p, mb))
+            file_meta.append((p.name, mb, True, p))
 
-        st.markdown(f"**{len(comp_inputs)} file(s) queued — total {total_orig_mb:.1f} MB**")
-        for comp_input, mb in comp_inputs:
-            st.caption(f"• {comp_input.name.replace('compress_', '')}  —  {mb:.1f} MB")
+        st.markdown(f"**{len(file_meta)} item(s) — total {total_orig_mb:.1f} MB**")
+        with st.expander("Show files", expanded=len(file_meta) <= 8):
+            for name, mb, _, _ in file_meta:
+                st.caption(f"• {name}  —  {mb:.1f} MB")
 
         if st.button("🗜️ Compress All", type="primary", key="compress_btn"):
-            comp_outputs = []
-            total_new_mb = 0.0
-            progress = st.progress(0)
-            status   = st.empty()
+            st.session_state.pop("comp_results", None)
 
-            for idx, (comp_input, orig_mb) in enumerate(comp_inputs):
-                status.markdown(f"Compressing **{comp_input.name.replace('compress_', '')}** ({idx+1}/{len(comp_inputs)})…")
-                comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.mp4"
+            # Fresh work area per run: earlier runs' files never leak into this ZIP.
+            shutil.rmtree(COMPRESS_ROOT, ignore_errors=True)
+            _run_dir = COMPRESS_ROOT / _uuid.uuid4().hex[:8]
+            _in_dir, _out_dir = _run_dir / "in", _run_dir / "out"
+            _in_dir.mkdir(parents=True)
+            _out_dir.mkdir(parents=True)
+
+            # Gather (relative path, source file) for every media file.
+            jobs: list[tuple[Path, Path]] = []
+            _taken: set[Path] = set()
+
+            def _claim(rel: Path) -> Path:
+                cand, n = rel, 1
+                while cand.with_suffix("") in _taken:
+                    n += 1
+                    cand = rel.with_name(f"{rel.stem}_{n}{rel.suffix}")
+                _taken.add(cand.with_suffix(""))
+                return cand
+
+            with st.spinner("Reading files…"):
+                for name, mb, is_queued, src in file_meta:
+                    try:
+                        if is_queued:
+                            jobs.append((_claim(Path(src.name)), Path(src)))
+                            continue
+                        rel = _clean_relpath(src.name)
+                        if rel is None:
+                            continue
+                        if rel.suffix.lower() == ".zip":
+                            import io
+                            with zipfile.ZipFile(io.BytesIO(src.getvalue())) as zf:
+                                for info in zf.infolist():
+                                    member = _clean_relpath(info.filename)
+                                    if (info.is_dir() or member is None
+                                            or member.suffix.lower() not in _MEDIA_EXT):
+                                        continue
+                                    member = _claim(Path(rel.stem) / member)
+                                    dest = _in_dir / member
+                                    dest.parent.mkdir(parents=True, exist_ok=True)
+                                    with zf.open(info) as zsrc, open(dest, "wb") as zdst:
+                                        shutil.copyfileobj(zsrc, zdst)
+                                    jobs.append((member, dest))
+                        elif rel.suffix.lower() in _MEDIA_EXT:
+                            rel = _claim(rel)
+                            dest = _in_dir / rel
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest.write_bytes(src.getvalue())
+                            jobs.append((rel, dest))
+                    except Exception as exc:
+                        st.error(f"Could not read {name}: {exc}")
+                        log.error("Compress intake failed for %s: %s", name, exc)
+
+            if not jobs:
+                st.warning("No images or videos found to compress.")
+                st.stop()
+
+            # Encode in parallel. Each ffmpeg gets a share of the cores, so a
+            # batch of short clips or stills no longer queues behind one file.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            _comp_outputs = []   # (out_path, rel_out, orig_mb, new_mb, kept_original)
+            _failures = []
+            progress = st.progress(0.0, text=f"Compressing 0 of {len(jobs)}…")
+            with ThreadPoolExecutor(max_workers=_COMPRESS_WORKERS) as pool:
+                futs = {pool.submit(compress_one, src, _out_dir / rel, comp_level): (rel, src)
+                        for rel, src in jobs}
+                for done_n, fut in enumerate(as_completed(futs), 1):
+                    rel, src = futs[fut]
+                    try:
+                        out, kept = fut.result()
+                        _comp_outputs.append((
+                            str(out), str(out.relative_to(_out_dir)),
+                            src.stat().st_size / 1_000_000,
+                            out.stat().st_size / 1_000_000, kept,
+                        ))
+                    except Exception as exc:
+                        _failures.append(f"{rel}: {str(exc)[-300:]}")
+                        log.error("Compress failed for %s: %s", rel, exc)
+                    progress.progress(done_n / len(jobs),
+                                      text=f"Compressing {done_n} of {len(jobs)}…")
+            progress.empty()
+            _comp_outputs.sort(key=lambda r: r[1])
+
+            _zip_path_str = None
+            if len(_comp_outputs) > 1:
                 try:
-                    is_image = comp_input.suffix.lower() in (".jpg", ".jpeg", ".png")
-                    is_gif = comp_input.suffix.lower() == ".gif"
-                    if is_image:
-                        # Convert still image → 10-second compressed MP4
-                        image_to_video(comp_input, comp_out, duration=10)
-                    elif is_gif:
-                        # GIF optimisation: reduce palette colours based on compression level
-                        colours_map = {"Light": 256, "Medium": 128, "High": 64, "Maximum": 32}
-                        colours = colours_map[comp_level]
-                        fps_map = {"Light": 25, "Medium": 15, "High": 10, "Maximum": 8}
-                        fps = fps_map[comp_level]
-                        palette = OUTPUT_DIR / f"_palette_{comp_input.stem}.png"
-                        _run([
-                            _FFMPEG_BIN, "-y", "-i", str(comp_input),
-                            "-vf", f"fps={fps},palettegen=max_colors={colours}:stats_mode=diff",
-                            str(palette),
-                        ])
-                        comp_out = OUTPUT_DIR / f"compressed_{comp_input.stem.replace('compress_', '')}.gif"
-                        _run([
-                            _FFMPEG_BIN, "-y",
-                            "-i", str(comp_input),
-                            "-i", str(palette),
-                            "-filter_complex", f"fps={fps}[x];[x][1:v]paletteuse=dither=bayer",
-                            str(comp_out),
-                        ])
-                        palette.unlink(missing_ok=True)
-                    else:
-                        _run([
-                            _FFMPEG_BIN, "-y",
-                            "-i", str(comp_input),
-                            "-c:v", "libx264",
-                            "-crf", str(comp_crf),
-                            "-preset", "medium",
-                            "-c:a", "aac", "-b:a", "128k",
-                            "-movflags", "+faststart",
-                            str(comp_out),
-                        ])
-                    new_mb = comp_out.stat().st_size / 1_000_000
-                    total_new_mb += new_mb
-                    comp_outputs.append((comp_out, orig_mb, new_mb))
-                except RuntimeError as exc:
-                    st.error(f"Failed: {comp_input.name} — {exc}")
-                progress.progress((idx + 1) / len(comp_inputs))
+                    _zp = zip_outputs([Path(r[0]) for r in _comp_outputs], _run_dir,
+                                      root=_out_dir,
+                                      name=_batch_name([r[1] for r in _comp_outputs]))
+                    _zip_path_str = str(_zp)
+                except Exception as _exc:
+                    log.error("ZIP creation failed: %s", _exc)
 
-            status.empty()
+            st.session_state.comp_results = {
+                "outputs":       _comp_outputs,
+                "failures":      _failures,
+                "total_orig_mb": sum(r[2] for r in _comp_outputs),
+                "total_new_mb":  sum(r[3] for r in _comp_outputs),
+                "zip_path":      _zip_path_str,
+            }
+            st.rerun()
 
-            if comp_outputs:
-                saved = total_orig_mb - total_new_mb
-                pct   = (saved / total_orig_mb * 100) if total_orig_mb else 0
-                st.success(f"✅ {len(comp_outputs)} file(s) compressed — {total_orig_mb:.1f} MB → {total_new_mb:.1f} MB ({pct:.0f}% smaller)")
+    # ── Results — driven by session state, survives all reruns ───────────────
+    _res = st.session_state.get("comp_results")
+    if _res:
+        _outputs = _res["outputs"]
+        _t_orig  = _res["total_orig_mb"]
+        _t_new   = _res["total_new_mb"]
+        _pct     = ((_t_orig - _t_new) / _t_orig * 100) if _t_orig else 0
 
-                # Per-file download buttons
-                st.markdown("#### 📥 Download")
-                for comp_out, orig_mb, new_mb in comp_outputs:
-                    saved_mb = orig_mb - new_mb
-                    pct_f    = (saved_mb / orig_mb * 100) if orig_mb else 0
-                    _mime = "image/gif" if comp_out.suffix.lower() == ".gif" else "video/mp4"
-                    st.download_button(
-                        label=f"⬇ {comp_out.name}  ({new_mb:.1f} MB, -{pct_f:.0f}%)",
-                        data=comp_out.read_bytes(),
-                        file_name=comp_out.name,
-                        mime=_mime,
-                        key=f"comp_dl_{comp_out.name}",
-                    )
+        if _outputs:
+            st.success(f"✅ {len(_outputs)} file(s) compressed — {_t_orig:.1f} MB → "
+                       f"{_t_new:.1f} MB ({_pct:.0f}% smaller)")
+        _kept = sum(1 for r in _outputs if r[4])
+        if _kept:
+            st.caption(f"{_kept} file(s) were already smaller than a re-encode would be "
+                       "and are included unchanged.")
+        if _res.get("failures"):
+            with st.expander(f"⚠️ {len(_res['failures'])} file(s) failed"):
+                for _f in _res["failures"]:
+                    st.error(_f)
 
-                # ZIP all if more than one
-                if len(comp_outputs) > 1:
-                    zip_path = zip_outputs([o for o, _, _ in comp_outputs], OUTPUT_DIR)
-                    st.download_button(
-                        label="📦 Download All as ZIP",
-                        data=zip_path.read_bytes(),
-                        file_name=zip_path.name,
-                        mime="application/zip",
-                        key="comp_zip",
-                    )
+        st.markdown("#### 📥 Download")
+        st.dataframe(
+            [{"File": rel, "Original (MB)": round(o, 2), "Compressed (MB)": round(n, 2),
+              "Saved": "unchanged" if kept else f"−{((o - n) / o * 100) if o else 0:.0f}%"}
+             for _, rel, o, n, kept in _outputs],
+            hide_index=True, use_container_width=True,
+            height=min(38 + 35 * len(_outputs), 400),
+        )
 
-                # ── Post-download actions ──────────────────────────────────
-                st.markdown("---")
-                st.markdown("#### What would you like to do next?")
-                _ca, _cb, _cc = st.columns(3)
-                with _ca:
-                    if st.button("🗜️ Compress More Files", type="secondary",
-                                 use_container_width=True, key="comp_next_more"):
-                        st.session_state.compress_key += 1
-                        st.session_state.compress_queued_files = []
-                        st.rerun()
-                with _cb:
-                    if st.button("🖥️ Convert Files", type="secondary",
-                                 use_container_width=True, key="comp_next_convert"):
-                        st.session_state.active_tab = "convert"
-                        st.rerun()
-                with _cc:
-                    if st.button("🗑️ Start Fresh", type="secondary",
-                                 use_container_width=True, key="comp_next_fresh"):
-                        for _k in ["selected_keys", "custom_formats", "ae_template",
-                                   "compress_queued_files"]:
-                            st.session_state.pop(_k, None)
-                        st.session_state.upload_key = st.session_state.get("upload_key", 0) + 1
-                        st.session_state.compress_key = st.session_state.get("compress_key", 0) + 1
-                        st.session_state.active_tab = "convert"
-                        st.rerun()
-    elif not _queued:
-        st.info("Upload one or more video files to get started.")
+        _valid = [r for r in _outputs if Path(r[0]).exists()]
+        if _outputs and not _valid:
+            st.warning("Output files no longer available. Please compress again.")
+        elif _valid:
+            # ZIP first — for a folder batch it is the only sensible download.
+            _zip_path = _res.get("zip_path")
+            if _zip_path and Path(_zip_path).exists():
+                st.download_button(
+                    label=f"📦 Download All as ZIP ({Path(_zip_path).stat().st_size / 1_000_000:.1f} MB)",
+                    data=open(_zip_path, "rb"),
+                    file_name=Path(_zip_path).name,
+                    mime="application/zip",
+                    key="comp_dl_zip",
+                    type="primary",
+                    use_container_width=True,
+                )
+            # Individual buttons only for small batches; a folder of hundreds
+            # of files would bury the page in buttons.
+            if len(_valid) <= 6:
+                _mimes = {".gif": "image/gif", ".png": "image/png", ".webp": "image/webp",
+                          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".mov": "video/quicktime"}
+                _dl_cols = st.columns(min(len(_valid), 3))
+                for _vi, (_vp, _rel, _vo, _vn, _vk) in enumerate(_valid):
+                    _vp = Path(_vp)
+                    with _dl_cols[_vi % 3]:
+                        st.download_button(
+                            label=f"⬇ {_vp.name}  ({_vn:.1f} MB)",
+                            data=open(_vp, "rb"),
+                            file_name=_vp.name,
+                            mime=_mimes.get(_vp.suffix.lower(), "video/mp4"),
+                            key=f"comp_dl_{_vi}",
+                            type="secondary" if len(_valid) > 1 else "primary",
+                            use_container_width=True,
+                        )
+
+        st.markdown("---")
+        st.markdown("#### What would you like to do next?")
+        _ca, _cb, _cc = st.columns(3)
+        with _ca:
+            if st.button("🗜️ Compress More Files", type="secondary",
+                         use_container_width=True, key="comp_next_more"):
+                st.session_state.compress_key += 1
+                st.session_state.pop("comp_results", None)
+                st.session_state.compress_queued_files = []
+                st.rerun()
+        with _cb:
+            if st.button("🖥️ Convert Files", type="secondary",
+                         use_container_width=True, key="comp_next_convert"):
+                st.session_state.active_tab = "convert"
+                st.rerun()
+        with _cc:
+            if st.button("🗑️ Start Fresh", type="secondary",
+                         use_container_width=True, key="comp_next_fresh"):
+                for _k in ["selected_keys", "custom_formats", "ae_template",
+                            "compress_queued_files", "comp_results", "export_results",
+                            "source_sig", "source_path", "importance_boxes"]:
+                    st.session_state.pop(_k, None)
+                st.session_state.upload_key += 1
+                st.session_state.compress_key += 1
+                st.session_state.active_tab = "convert"
+                st.rerun()
+
+    elif not (comp_uploaded or _queued):
+        st.info("Upload images or videos — individually, as a folder, or as a ZIP — to get started.")
 
 
 # ══════════════════════════════════════════════
 # TAB 1 — CONVERT
 # ══════════════════════════════════════════════
-
-def _step_header(num: int, label: str, done: bool = False):
-    badge = (
-        "<span style='background:#16a34a;color:#fff;border-radius:50%;display:inline-flex;"
-        "align-items:center;justify-content:center;width:28px;height:28px;font-size:0.85rem;"
-        "font-weight:700;margin-right:10px;flex-shrink:0;'>✓</span>"
-        if done else
-        f"<span style='background:#3b82f6;color:#fff;border-radius:50%;display:inline-flex;"
-        f"align-items:center;justify-content:center;width:28px;height:28px;font-size:0.85rem;"
-        f"font-weight:700;margin-right:10px;flex-shrink:0;'>{num}</span>"
-    )
-    st.markdown(
-        f"<div style='display:flex;align-items:center;margin:22px 0 8px;'>"
-        f"{badge}<span style='font-size:1.1rem;font-weight:700;color:#f1f5f9;'>{label}</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
 
 if st.session_state.active_tab == "convert":
     templates = load_templates()
@@ -1032,111 +1033,98 @@ if st.session_state.active_tab == "convert":
     # ════════════════════════════════════
     # STEP 1 — Select Templates
     # ════════════════════════════════════
-    _step_header(1, "Select Screen Template(s)", done=step1_done)
+    ui.step_header(1, "Select screen templates", done=step1_done)
 
-    # CSS — card-style template buttons (height scoped to pre-line cards only, not nav)
-    st.markdown("""
-<style>
-/* Unselected template card */
-[data-testid="stButton"] > button[kind="secondary"] {
-    min-height: 72px !important;
-    text-align: left !important;
-    padding: 10px 14px !important;
-    white-space: pre-line !important;
-    line-height: 1.45 !important;
-    font-size: 0.86rem !important;
-    border-radius: 10px !important;
-    background: #0f1f35 !important;
-    border: 2px solid #2d3748 !important;
-    color: #cbd5e1 !important;
-}
-[data-testid="stButton"] > button[kind="secondary"]:hover {
-    border-color: #3b82f6 !important;
-    background: #1a2f50 !important;
-    color: #f1f5f9 !important;
-}
-[data-testid="stButton"] > button[kind="secondary"] p,
-[data-testid="stButton"] > button[kind="secondary"] span {
-    text-align: left !important;
-    color: inherit !important;
-    white-space: pre-line !important;
-}
-/* Selected template card */
-[data-testid="stButton"] > button[kind="primary"] {
-    min-height: 72px !important;
-    text-align: left !important;
-    padding: 10px 14px !important;
-    white-space: pre-line !important;
-    line-height: 1.45 !important;
-    font-size: 0.86rem !important;
-    border-radius: 10px !important;
-    background: #1e3a5f !important;
-    border: 2px solid #60a5fa !important;
-    box-shadow: 0 0 0 3px rgba(96,165,250,0.2) !important;
-}
-[data-testid="stButton"] > button[kind="primary"] p,
-[data-testid="stButton"] > button[kind="primary"] span {
-    text-align: left !important;
-    color: #f1f5f9 !important;
-    white-space: pre-line !important;
-    font-weight: 600 !important;
-}
-</style>
-""", unsafe_allow_html=True)
+    # Venue grouping is derived from the template name ("Menlyn Sky", "Monte
+    # Casino Piazza"). Tags can't carry this — 40 of the 60 templates are
+    # tagged simply "malls" — so the group label is the longest run of leading
+    # words every template in the group shares.
+    _groups: dict[str, list[str]] = {}
+    for _k in all_keys:
+        _groups.setdefault(templates[_k].name.split()[0], []).append(_k)
 
-    # Search bar — reruns on every keystroke (no Enter required)
-    if "tmpl_search" not in st.session_state:
-        st.session_state.tmpl_search = ""
-    st.text_input(
-        "Search templates",
-        placeholder="🔍  Type to search templates…",
-        label_visibility="collapsed",
-        key="tmpl_search",
-        on_change=lambda: None,  # fires rerun on every character change
+    def _group_label(keys: list[str]) -> str:
+        words = [templates[k].name.split() for k in keys]
+        shared: list[str] = []
+        for i in range(min(len(w) for w in words)):
+            if all(w[i] == words[0][i] for w in words):
+                shared.append(words[0][i])
+            else:
+                break
+        return (" ".join(shared)).rstrip(" -—·") or templates[keys[0]].name
+
+    _labelled = sorted(
+        ((_group_label(ks), ks) for ks in _groups.values()),
+        key=lambda pair: (-len(pair[1]), pair[0]),
     )
-    search_q = st.session_state.tmpl_search
+    _venue_of = {k: lbl for lbl, ks in _labelled for k in ks}
 
-    if not search_q:
-        # Show selected chips even when not searching
-        if not st.session_state.selected_keys:
-            st.caption("Type above to search and select templates.")
-    else:
-        filtered_keys = [k for k in all_keys if search_q.lower() in k.lower()]
-        if not filtered_keys:
-            st.caption("No templates match your search.")
-        else:
-            st.caption(f"{len(filtered_keys)} result(s) — click a card to select / deselect")
-            COLS = 3
-            rows = [filtered_keys[i:i+COLS] for i in range(0, len(filtered_keys), COLS)]
-            for row in rows:
-                cols = st.columns(COLS)
-                for col, key in zip(cols, row):
-                    t = templates[key]
-                    selected = key in st.session_state.selected_keys
-                    short_name = t.name if len(t.name) <= 26 else t.name[:24] + "…"
-                    label = f"{'✓  ' if selected else ''}{short_name}\n{t.primary_resolution}  ·  {len(t.formats)} format(s)"
-                    css_class = "tmpl-card-btn-sel" if selected else "tmpl-card-btn"
-                    with col:
-                        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-                        if st.button(label, key=f"tmpl_btn_{key}", use_container_width=True):
-                            if selected:
-                                st.session_state.selected_keys.remove(key)
-                            else:
-                                st.session_state.selected_keys.append(key)
-                            st.rerun()
-                        st.markdown('</div>', unsafe_allow_html=True)
+    def _option_label(key: str) -> str:
+        t = templates[key]
+        detail = (f"{len(t.formats)} formats" if len(t.formats) > 1
+                  else t.primary_resolution)
+        return f"{t.name}  ·  {detail}"
 
+    # ── Venue, then screens ────────────────────────
+    # A grid of 60 cards meant scrolling past every mall to reach one screen.
+    # Narrowing by venue first keeps the list short, and the multiselect itself
+    # accepts typing, so searching by mall, screen or resolution still works
+    # without a separate search field.
+    c_venue, c_all = st.columns([3, 1])
+    with c_venue:
+        _venue_pick = st.selectbox(
+            "Venue",
+            ["All venues"] + [f"{lbl}  ({len(ks)})" for lbl, ks in _labelled],
+            key="tmpl_venue",
+            help="Narrow the list to one mall, or leave on All venues to search everything.",
+        )
+    _venue_name = _venue_pick.split("  (")[0]
+    _option_keys = ([k for lbl, ks in _labelled if lbl == _venue_name for k in ks]
+                    if _venue_pick != "All venues" else all_keys)
+
+    with c_all:
+        st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+        if _venue_pick != "All venues":
+            if st.button(f"Add all {len(_option_keys)}", use_container_width=True,
+                         key="add_all_venue"):
+                for k in _option_keys:
+                    if k not in st.session_state.selected_keys:
+                        st.session_state.selected_keys.append(k)
+                st.rerun()
+
+    # Selections made under a different venue filter must survive the switch,
+    # so they are held aside and merged back after the widget reports.
+    _held = [k for k in st.session_state.selected_keys if k not in _option_keys]
+    _picked = st.multiselect(
+        "Screens",
+        options=_option_keys,
+        default=[k for k in st.session_state.selected_keys if k in _option_keys],
+        format_func=_option_label,
+        placeholder="Type a mall, screen or resolution…",
+        label_visibility="collapsed",
+    )
+    st.session_state.selected_keys = _held + _picked
+
+    # ── Selection summary ──────────────────────────
     if st.session_state.selected_keys:
-        st.markdown("---")
+        _total_outputs = sum(len(templates[k].formats)
+                             for k in st.session_state.selected_keys)
         c1, c2 = st.columns([6, 1])
         with c1:
-            st.caption("**Selected:** " + "  ·  ".join(
-                templates[k].name for k in st.session_state.selected_keys
-            ))
+            st.markdown(
+                ui.badge(f"{len(st.session_state.selected_keys)} screens", "info")
+                + "&nbsp;&nbsp;"
+                + ui.badge(f"{_total_outputs} files will export", "neutral"),
+                unsafe_allow_html=True,
+            )
         with c2:
-            if st.button("✕ Clear all", type="secondary", key="clear_all_tmpl"):
+            if st.button("Clear", type="secondary", key="clear_all_tmpl",
+                         use_container_width=True):
                 st.session_state.selected_keys = []
                 st.rerun()
+    else:
+        st.caption(f"{len(all_keys)} templates across {len(_labelled)} venues. "
+                   "Pick a venue, or type to search all of them.")
 
     # ── Optional: Custom screen size ───────────────
     _RATIOS = {
@@ -1307,7 +1295,7 @@ if st.session_state.active_tab == "convert":
         total_formats += len(custom_tmpl.formats)
 
     st.markdown("---")
-    _step_header(2, "Upload Your Master File")
+    ui.step_header(2, "Upload your master file")
 
     uploaded = st.file_uploader(
         "Upload master file",
@@ -1320,29 +1308,55 @@ if st.session_state.active_tab == "convert":
         st.info("Upload an MP4, MOV, JPG or PNG file to continue.")
         st.stop()
 
-    for _old in INPUT_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
+    # Streamlit re-runs this whole script on every widget interaction. Without a
+    # guard, each click re-wrote the upload to disk, re-encoded stills to video,
+    # re-probed metadata and re-ran crop analysis — several seconds of ffmpeg per
+    # click, and the cause of the sluggishness and the download races. Everything
+    # below is therefore keyed on a hash of the file's contents.
+    _payload = uploaded.getvalue()
+    _sig = hashlib.sha256(_payload).hexdigest()[:16] + f"-{slot_duration}"
 
-    file_ext = Path(uploaded.name).suffix.lower()
+    file_ext   = Path(uploaded.name).suffix.lower()
     input_path = INPUT_DIR / uploaded.name
-    input_path.write_bytes(uploaded.read())
-    st.success(f"✅ Uploaded **{uploaded.name}**")
 
-    # ── Image → Video conversion ───────────────────
+    if st.session_state.get("source_sig") != _sig:
+        # A new master invalidates everything derived from the old one. The
+        # preview thumbnail was only generated "if not exists", and the previous
+        # export results were re-shown until Export was clicked again — so a
+        # fresh upload kept showing (and offering for download) the last file.
+        for _dir in (INPUT_DIR, PREVIEW_DIR):
+            for _old in _dir.iterdir():
+                try:
+                    _old.unlink()
+                except Exception:
+                    pass
+        st.session_state.pop("export_results", None)
+        input_path.write_bytes(_payload)
+
+        # ── Image → Video conversion ───────────────
+        if file_ext in (".jpg", ".jpeg", ".png"):
+            video_path = INPUT_DIR / "converted_video.mp4"
+            with st.spinner(f"Converting still image to a {slot_duration}s video…"):
+                try:
+                    image_to_video(input_path, video_path, slot_duration)
+                    input_path = video_path
+                except RuntimeError as exc:
+                    st.error(f"Conversion failed: {exc}")
+                    st.stop()
+
+        st.session_state.source_sig  = _sig
+        st.session_state.source_path = str(input_path)
+        st.session_state.pop("importance_boxes", None)
+    else:
+        input_path = Path(st.session_state.source_path)
+        if not input_path.exists():
+            # Session scratch was swept — force a clean re-ingest next run
+            st.session_state.pop("source_sig", None)
+            st.rerun()
+
+    st.success(f"Uploaded **{uploaded.name}**")
     if file_ext in (".jpg", ".jpeg", ".png"):
-        st.info(f"Still image detected — will be converted to a {img_duration}s video.")
-        video_path = INPUT_DIR / "converted_video.mp4"
-        with st.spinner("Converting image to video…"):
-            try:
-                image_to_video(input_path, video_path, img_duration)
-                input_path = video_path
-                st.success("Image converted to video ✓")
-            except RuntimeError as exc:
-                st.error(f"Conversion failed: {exc}")
-                st.stop()
+        st.caption(f"Still image — converted to a {slot_duration}s video for export.")
 
     # ── Probe & preview ────────────────────────────
     try:
@@ -1352,21 +1366,26 @@ if st.session_state.active_tab == "convert":
         st.stop()
 
     thumb_path = PREVIEW_DIR / "thumb.jpg"
-    generate_thumbnail(input_path, thumb_path)
+    if not thumb_path.exists():
+        generate_thumbnail(input_path, thumb_path)
 
     # ── Smart crop detection ────────────────────────
     importance_boxes: list[tuple[int, int, int, int]] = []
     if use_smart_crop:
-        with st.spinner("🧠 Analysing content (faces, text, logos)…"):
-            try:
-                from smart_crop import extract_keyframes, detect_importance_regions, draw_detections
-                frames = extract_keyframes(input_path)
-                importance_boxes = detect_importance_regions(frames)
-                if importance_boxes and thumb_path.exists():
-                    overlay_path = PREVIEW_DIR / "thumb_overlay.jpg"
-                    draw_detections(thumb_path, importance_boxes, overlay_path)
-            except Exception as exc:
-                st.warning(f"Smart crop analysis unavailable: {exc}")
+        if "importance_boxes" in st.session_state:
+            importance_boxes = st.session_state.importance_boxes
+        else:
+            with st.spinner("Analysing content to keep key elements in frame…"):
+                try:
+                    from smart_crop import extract_keyframes, detect_importance_regions, draw_detections
+                    frames = extract_keyframes(input_path)
+                    importance_boxes = detect_importance_regions(frames)
+                    if importance_boxes and thumb_path.exists():
+                        overlay_path = PREVIEW_DIR / "thumb_overlay.jpg"
+                        draw_detections(thumb_path, importance_boxes, overlay_path)
+                    st.session_state.importance_boxes = importance_boxes
+                except Exception as exc:
+                    st.warning(f"Smart crop analysis unavailable: {exc}")
 
     col_a, col_b = st.columns([1, 2])
     with col_a:
@@ -1382,9 +1401,28 @@ if st.session_state.active_tab == "convert":
         st.markdown("**Source file**")
         st.markdown(f"- Resolution: **{video_w}×{video_h}**")
         if duration:
-            st.markdown(f"- Duration: **{duration:.1f}s**")
+            _out_secs = min(duration, slot_duration)
+            st.markdown(
+                f"- Duration: **{duration:.1f}s** → exports at **{_out_secs:.1f}s**"
+            )
         st.markdown(f"- Templates selected: **{len(selected_templates)}**")
         st.markdown(f"- Total outputs: **{total_formats}**")
+
+        # Say plainly what the duration cap will do to this specific file,
+        # before the user spends time on an export.
+        if duration:
+            if duration > slot_duration + 0.05:
+                st.warning(
+                    f"This clip is {duration:.1f}s and will be **trimmed to the "
+                    f"first {slot_duration}s**. Change the output duration in the "
+                    "sidebar if that is wrong."
+                )
+            elif duration < slot_duration - 0.05:
+                st.info(
+                    f"This clip is {duration:.1f}s — shorter than the "
+                    f"{slot_duration}s slot. It exports at its own length; "
+                    "it is not padded or looped."
+                )
         if use_smart_crop:
             if importance_boxes:
                 st.success(f"🧠 Smart crop active — {len(importance_boxes)} important region(s) detected")
@@ -1398,72 +1436,120 @@ if st.session_state.active_tab == "convert":
     if custom_tmpl:
         effective_templates.append(custom_tmpl)
 
-    all_export_jobs: list[tuple[Template, FormatPlan]] = []
+    # Each job gets its output file name up front. Names were previously built
+    # as "<label>_<WxH>.mp4" at export time, and ten of them collide across
+    # templates (e.g. "Boardwalk_600x720" from both Boardwalk and Portrait
+    # Screens). The later export overwrote the earlier one and the ZIP held the
+    # same entry twice. Identical name + size is the identical file, so those
+    # are exported once.
+    all_export_jobs: list[tuple[Template, FormatPlan, str]] = []
+    _seen_names: set[str] = set()
+    _source_stem = _keep_name(Path(uploaded.name).stem)
     for tmpl in effective_templates:
         for plan in plan_exports(tmpl, video_w, video_h,
                                  importance_boxes=importance_boxes or None):
-            all_export_jobs.append((tmpl, plan))
+            # Outputs keep the master's own name, then the screen and size:
+            # "Summer Sale_Boardwalk_600x720.mp4".
+            _stem = _safe_name(plan.label or tmpl.name)
+            _fname = f"{_source_stem}_{_stem}_{plan.width}x{plan.height}.mp4"
+            if _fname in _seen_names:
+                continue
+            _seen_names.add(_fname)
+            all_export_jobs.append((tmpl, plan, _fname))
+
+    # Results are only valid for the exact source + jobs + settings that made
+    # them; any change hides the stale results until the next export.
+    _export_sig = hashlib.sha256(json.dumps([
+        st.session_state.get("source_sig"),
+        [(f, p.width, p.height, p.crop_x, p.crop_y) for _, p, f in all_export_jobs],
+        crf, preset, resize_mode_key, slot_duration,
+    ]).encode()).hexdigest()[:16]
 
     # ════════════════════════════════════
     # STEP 3 — Export
     # ════════════════════════════════════
     st.markdown("---")
-    _step_header(3, "Export All Formats")
+    ui.step_header(3, "Export all formats")
     st.caption(
         f"{len(all_export_jobs)} output(s) will be generated across "
         f"{len(effective_templates)} template(s)."
     )
 
-    if not st.button("🚀 Export Now", type="primary", use_container_width=True):
-        st.stop()
+    _export_clicked = st.button("🚀 Export Now", type="primary", use_container_width=True)
 
-    for _old in OUTPUT_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
-    for _old in PREVIEW_DIR.iterdir():
-        try:
-            _old.unlink()
-        except Exception:
-            pass
+    # st.button() is only True on the rerun immediately after its own click, and
+    # clicking a download button also triggers a rerun. Gating the results
+    # section on the button therefore tore down the download widgets mid-
+    # download — the browser's request for the file arrived after the widget
+    # (and its registered data) was gone. Keep the results in session_state so
+    # they survive those reruns.
+    if _export_clicked:
+        for _old in OUTPUT_DIR.iterdir():
+            try:
+                _old.unlink()
+            except Exception:
+                pass
+        for _old in PREVIEW_DIR.iterdir():
+            try:
+                _old.unlink()
+            except Exception:
+                pass
 
-    output_files: list[Path] = []
-    errors: list[str]        = []
+        output_files: list[Path] = []
+        errors: list[str]        = []
 
-    progress_bar = st.progress(0)
-    status_text  = st.empty()
-    total        = len(all_export_jobs)
+        progress_bar = st.progress(0)
+        status_text  = st.empty()
+        total        = len(all_export_jobs)
 
-    for i, (tmpl, plan) in enumerate(all_export_jobs):
-        file_label = plan.label if plan.label else tmpl.name.replace(' ', '_')
-        out = OUTPUT_DIR / f"{file_label}_{plan.width}x{plan.height}.mp4"
-        status_text.markdown(
-            f"⏳ Exporting **{tmpl.name}** — {plan.width}×{plan.height}  ({i+1}/{total})…"
-        )
-
-        try:
-            export_format(
-                src=input_path,
-                dst=out,
-                width=plan.width,
-                height=plan.height,
-                crop_x=plan.crop_x,
-                crop_y=plan.crop_y,
-                crf=crf,
-                preset=preset,
-                resize_mode=resize_mode_key,
+        for i, (tmpl, plan, fname) in enumerate(all_export_jobs):
+            out = OUTPUT_DIR / fname
+            status_text.markdown(
+                f"⏳ Exporting **{tmpl.name}** — {plan.width}×{plan.height}  ({i+1}/{total})…"
             )
-            output_files.append(out)
-            log.info("Exported %s", out.name)
-        except RuntimeError as exc:
-            err_msg = f"{tmpl.name} {plan.width}×{plan.height}: {exc}"
-            errors.append(err_msg)
-            log.error(err_msg)
 
-        progress_bar.progress((i + 1) / total)
+            try:
+                export_format(
+                    src=input_path,
+                    dst=out,
+                    width=plan.width,
+                    height=plan.height,
+                    crop_x=plan.crop_x,
+                    crop_y=plan.crop_y,
+                    crf=crf,
+                    preset=preset,
+                    resize_mode=resize_mode_key,
+                    max_duration=slot_duration,
+                    scaled_w=plan.scaled_w,
+                    scaled_h=plan.scaled_h,
+                )
+                output_files.append(out)
+                log.info("Exported %s", out.name)
+            except RuntimeError as exc:
+                err_msg = f"{tmpl.name} {plan.width}×{plan.height}: {exc}"
+                errors.append(err_msg)
+                log.error(err_msg)
 
-    status_text.empty()
+            progress_bar.progress((i + 1) / total)
+
+        status_text.empty()
+
+        st.session_state.export_results = {
+            "files":  [str(p) for p in output_files],
+            "errors": errors,
+            "total":  total,
+            "zip":    None,
+            "sig":    _export_sig,
+        }
+    else:
+        _prev = st.session_state.get("export_results")
+        if not _prev or _prev.get("sig") != _export_sig:
+            st.stop()
+        output_files = [Path(p) for p in _prev["files"] if Path(p).exists()]
+        errors       = list(_prev["errors"])
+        total        = _prev["total"]
+        if not output_files:
+            st.stop()
 
     # ── Results ────────────────────────────────────
     st.markdown("---")
@@ -1475,7 +1561,8 @@ if st.session_state.active_tab == "convert":
         thumb_cols = st.columns(min(len(output_files), 4))
         for idx, out_file in enumerate(output_files):
             thumb = PREVIEW_DIR / f"thumb_{out_file.stem}.jpg"
-            generate_thumbnail(out_file, thumb)
+            if not thumb.exists():
+                generate_thumbnail(out_file, thumb)
             res = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
             file_size = out_file.stat().st_size / 1_000_000
             with thumb_cols[idx % 4]:
@@ -1484,29 +1571,40 @@ if st.session_state.active_tab == "convert":
                 else:
                     st.markdown(f"**{res}** — {file_size:.1f} MB")
 
-        # Download buttons
+        # Download buttons — one per output file, then a ZIP for multi-file
         st.markdown("#### 📥 Download")
         dl_cols = st.columns(min(len(output_files), 4))
         for idx, out_file in enumerate(output_files):
-            res = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
+            _res_label = out_file.stem.rsplit("_", 1)[-1].replace("x", "×") if "_" in out_file.stem else out_file.stem
+            _sz = out_file.stat().st_size / 1_000_000
             with dl_cols[idx % 4]:
                 st.download_button(
-                    label=f"⬇ {res}",
+                    label=f"⬇ {_res_label} ({_sz:.1f} MB)",
                     data=out_file.read_bytes(),
                     file_name=out_file.name,
                     mime="video/mp4",
                     key=f"dl_{idx}",
                     use_container_width=True,
                 )
-
         if len(output_files) > 1:
-            zip_path = zip_outputs(output_files, OUTPUT_DIR)
+            # Build the ZIP once per export. zip_outputs() names the file with a
+            # timestamp, so rebuilding it on every rerun moved the target out
+            # from under the download token. Mirrors the compress tab's fix.
+            _res = st.session_state.get("export_results") or {}
+            _cached_zip = _res.get("zip")
+            if _cached_zip and Path(_cached_zip).exists():
+                zip_path = Path(_cached_zip)
+            else:
+                zip_path = zip_outputs(output_files, OUTPUT_DIR, name=_source_stem)
+                _res["zip"] = str(zip_path)
+                st.session_state.export_results = _res
             st.download_button(
                 label="📦 Download All as ZIP",
                 data=zip_path.read_bytes(),
                 file_name=zip_path.name,
                 mime="application/zip",
                 use_container_width=True,
+                key="dl_zip",
             )
 
         # ── Post-download actions ──────────────────────────────────────────
@@ -1516,6 +1614,9 @@ if st.session_state.active_tab == "convert":
         with _na:
             if st.button("🔄 Convert Another File", type="secondary",
                          use_container_width=True, key="next_convert_another"):
+                for _k in ["export_results", "source_sig", "source_path",
+                           "importance_boxes"]:
+                    st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.rerun()
         with _nb:
@@ -1528,7 +1629,8 @@ if st.session_state.active_tab == "convert":
             if st.button("🗑️ Start Fresh", type="secondary",
                          use_container_width=True, key="next_start_fresh"):
                 for _k in ["selected_keys", "custom_formats", "ae_template",
-                            "compress_queued_files"]:
+                            "compress_queued_files", "export_results",
+                            "source_sig", "source_path", "importance_boxes"]:
                     st.session_state.pop(_k, None)
                 st.session_state.upload_key += 1
                 st.session_state.compress_key += 1
